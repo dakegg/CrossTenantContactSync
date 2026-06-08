@@ -54,6 +54,7 @@ Source Tenant (Graph) --> PowerShell Script --> Target Tenant (Exchange)
 2. Add permissions:
    - User.Read.All
    - Directory.Read.All
+   - Group.Read.Aall
 3. Create client secret
 
 ---
@@ -78,8 +79,19 @@ New-SelfSignedCertificate -CertStoreLocation Cert:\LocalMachine\My
 ### Manual
 
 ```
-.\TenantContactSync.ps1 -ConfigXmlPath ".\config.xml"
+.\TenantContactSync.ps1 -ConfigXmlPath ".\config.xml" -SourceObjectType User
 ```
+
+```
+.\TenantContactSync.ps1 -ConfigXmlPath ".\config.xml" -SourceObjectType Group
+```
+
+```
+.\TenantContactSync.ps1 -ConfigXmlPath ".\config.xml" -SourceObjectType Both
+```
+
+**Parameter Switches ALWAYS take priority over XML settings**
+
 
 ### Test Mode
 
