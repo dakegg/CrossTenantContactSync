@@ -20,6 +20,8 @@
     <AppendSourceTenantToDisplayName>true</AppendSourceTenantToDisplayName>
     <AllowUpnFallback>true</AllowUpnFallback>
     <DisableDeletes>false</DisableDeletes>
+    <SourceObjectType>User</SourceObjectType>
+    <TopUsers>0</TopUsers>
   </Runtime>
 
   <Filters>
