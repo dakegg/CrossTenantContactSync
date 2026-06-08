@@ -54,7 +54,7 @@ Source Tenant (Graph) --> PowerShell Script --> Target Tenant (Exchange)
 2. Add permissions:
    - User.Read.All
    - Directory.Read.All
-   - Group.Read.Aall
+   - Group.Read.All
 3. Create client secret
 
 ---
