@@ -4,6 +4,7 @@ param(
     [string]$ConfigXmlPath="C:\temp\TenantContactSync\TenantAtoTenantBConfig.xml",
 
     # ---------- Source tenant / Graph ----------
+    # Source tenant name is a FRIENDLY name that could be appended to the end of the target DisplayName
     [string]$SourceTenantId,
     [string]$SourceTenantName,
     [string]$SourceClientId,
