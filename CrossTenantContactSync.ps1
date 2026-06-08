@@ -39,7 +39,7 @@ param(
     [bool]$DisableDeletes = $false,
 
     #scoping
-    [int]$TopUsers = 140
+    [int]$TopUsers = 0
 )
 
 Set-StrictMode -Version Latest
