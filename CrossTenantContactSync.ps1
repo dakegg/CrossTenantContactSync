@@ -1,7 +1,7 @@
 ﻿[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     # Optional external config file. If supplied, values here override/augment parameters.
-    [string]$ConfigXmlPath,
+    [string]$ConfigXmlPath="C:\temp\TenantContactSync\TenantAtoTenantBConfig.xml",
 
     # ---------- Source tenant / Graph ----------
     [string]$SourceTenantId,
