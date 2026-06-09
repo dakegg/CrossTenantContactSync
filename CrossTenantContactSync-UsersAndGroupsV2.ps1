@@ -243,9 +243,10 @@ param(
     [ValidateSet('User','Group','Both')]
     [string]$SourceObjectType = 'Both',
     [ValidateSet('None','User','Group','Both')]
-    [string]$ForceFullSync = 'Group',
+    [string]$ForceFullSync = 'None',
     [ValidateSet('None','User','Group','Both')]
-    [string]$SeedTargetFromSource = 'None'
+    [string]$SeedTargetFromSource = 'None',
+    [switch]$ForceDisplayNameRefresh
 
 )
 
@@ -837,7 +838,9 @@ function Set-TargetMailContact {
 
         $needsUpdate = $false
 
-        if ($existing.DisplayName -ne $displayName) { $needsUpdate = $true }
+        #if ($existing.DisplayName -ne $displayName) { $needsUpdate = $true }
+
+        if ($ForceDisplayNameRefresh -and $Config.AppendSourceTenantToDisplayName) { $needsUpdate = $true } elseif ($existing.DisplayName -ne $displayName) { $needsUpdate = $true }
 
         $existingEmail = $existing.ExternalEmailAddress.ToString().ToLower().Replace("smtp:","")
         if ($existingEmail -ne $externalEmail.ToLower()) { $needsUpdate = $true }
@@ -851,7 +854,8 @@ function Set-TargetMailContact {
 
         if ($PSCmdlet.ShouldProcess($identity, "Update target mail contact")) {
 
-            Write-Log "Updating contact: Identity=$identity Email=$externalEmail SyncKey=$syncKey"
+            if ($ForceDisplayNameRefresh) { Write-Log "Forcing displayName refresh: $displayName" "WARN" } 
+            else { Write-Log "Updating contact: Identity=$identity Email=$externalEmail SyncKey=$syncKey" }
 
             Invoke-ExoWithRetry {
                 Set-MailContact -Identity $identity -DisplayName $displayName -ExternalEmailAddress $externalEmail -CustomAttribute15 $syncKey
@@ -959,10 +963,7 @@ function Set-TargetMailContactFromGroup {
 
     $syncKey = Get-SyncKey -SourceTenantId $Config.SourceTenantId -SourceObjectId $Group.id -SourceObjectType 'Group'
 
-    $displayName = Get-DisplayNameForTarget `
-        -User $Group `
-        -AppendSourceTenantToDisplayName $Config.AppendSourceTenantToDisplayName `
-        -SourceTenantName $Config.SourceTenantName
+    $displayName = Get-DisplayNameForTarget -User $Group -AppendSourceTenantToDisplayName $Config.AppendSourceTenantToDisplayName -SourceTenantName $Config.SourceTenantName
 
     $alias = New-SafeAlias -Email $externalEmail -SourceObjectId $Group.id
 
@@ -979,7 +980,8 @@ function Set-TargetMailContactFromGroup {
 
         $needsUpdate = $false
 
-        if ($existing.DisplayName -ne $displayName) { $needsUpdate = $true }
+        #if ($existing.DisplayName -ne $displayName) { $needsUpdate = $true }
+        if ($ForceDisplayNameRefresh -and $Config.AppendSourceTenantToDisplayName) { $needsUpdate = $true } elseif ($existing.DisplayName -ne $displayName) { $needsUpdate = $true }
 
         $existingEmail = $existing.ExternalEmailAddress.ToString().ToLower().Replace("smtp:","")
         if ($existingEmail -ne $externalEmail.ToLower()) { $needsUpdate = $true }
@@ -993,7 +995,10 @@ function Set-TargetMailContactFromGroup {
 
         if ($PSCmdlet.ShouldProcess($identity, "Update group contact")) {
 
-            Write-Log "Updating group contact: Identity=$identity Email=$externalEmail SyncKey=$syncKey"
+            if ($ForceDisplayNameRefresh) { Write-Log "Forcing displayName refresh: $displayName" "WARN" } 
+            else { Write-Log "Updating group contact: Identity=$identity Email=$externalEmail SyncKey=$syncKey" }
+
+            #Write-Log "Updating group contact: Identity=$identity Email=$externalEmail SyncKey=$syncKey"
 
             Invoke-ExoWithRetry {
                 Set-MailContact `
