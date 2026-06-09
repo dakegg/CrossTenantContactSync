@@ -24,13 +24,22 @@
     <TopUsers>0</TopUsers>
   </Runtime>
 
-  <Filters>
-    <IncludeDomains>
-      <Domain>tenanta.com</Domain>
-      <Domain>subsidiary-a.com</Domain>
-    </IncludeDomains>
-    <ExcludeDomains>
-      <Domain>serviceaccount.tenanta.com</Domain>
-    </ExcludeDomains>
-  </Filters>
+<Filters>
+  <IncludeDomains>
+    <Domain>contoso.com</Domain>
+  </IncludeDomains>
+
+  <ExcludeDomains>
+    <Domain>gmail.com</Domain>
+  </ExcludeDomains>
+
+  <ServiceAccountPatterns>
+    <Pattern>^sync_</Pattern>
+    <Pattern>^aadconnect</Pattern>
+    <Pattern>^msol_</Pattern>
+    <Pattern>^svc[-_]</Pattern>
+    <Pattern>^service</Pattern>
+    <Pattern>azureadconnect</Pattern>
+  </ServiceAccountPatterns>
+</Filters>
 </Configuration>
