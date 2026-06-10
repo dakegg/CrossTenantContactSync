@@ -444,7 +444,6 @@ function Invoke-GraphJson {
     }
 
     try {
-        #Write-Log "GRAPH GET: $Uri" "DEBUG"
         return Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers
     }
     catch {
