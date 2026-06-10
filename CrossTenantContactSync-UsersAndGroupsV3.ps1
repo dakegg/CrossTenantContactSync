@@ -415,6 +415,7 @@ function Get-GraphToken {
     )
 
     $tokenEndpoint = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
+
     $body = @{
         client_id     = $ClientId
         client_secret = $ClientSecret
@@ -422,7 +423,12 @@ function Get-GraphToken {
         grant_type    = "client_credentials"
     }
 
-    $resp = Invoke-RestMethod -Method Post -Uri $tokenEndpoint -Body $body -ContentType 'application/x-www-form-urlencoded'
+    $resp = Invoke-RestMethod `
+        -Method Post `
+        -Uri $tokenEndpoint `
+        -Body $body `
+        -ContentType 'application/x-www-form-urlencoded'
+
     return $resp.access_token
 }
 
