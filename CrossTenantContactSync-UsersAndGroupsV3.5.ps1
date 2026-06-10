@@ -44,7 +44,7 @@
     Darryl Kegg
 
 .VERSION
-    2.6.0
+    3.5.0
 
 .CHANGELOG
 
@@ -235,11 +235,12 @@ function Get-ConfigFromXml {
             if (-not $f.Value) { continue }
 
             $attributeFilters += [pscustomobject]@{
-                ObjectType   = if ($f.ObjectType) { [string]$f.ObjectType } else { 'Both' }
-                PropertyPath = [string]$f.PropertyPath
-                Operator     = if ($f.Operator) { [string]$f.Operator } else { 'Equals' }
-                Value        = [string]$f.Value
+                ObjectType   = if ($f.ObjectType) { ([string]$f.ObjectType).Trim() } else { 'Both' }
+                PropertyPath = ([string]$f.PropertyPath).Trim()
+                Operator     = if ($f.Operator) { ([string]$f.Operator).Trim() } else { 'Equals' }
+                Value        = ([string]$f.Value).Trim()
             }
+
         }
     }
 
@@ -608,6 +609,24 @@ function Test-GroupInScope {
     return $false
 }
 
+function Find-TargetContactByEmail {
+    param([Parameter(Mandatory)][string]$Email)
+
+    try {
+        $normalized = $Email.ToLower()
+
+        $results = Get-MailContact -ResultSize Unlimited | Where-Object {
+            $_.ExternalEmailAddress -and
+            $_.ExternalEmailAddress.ToString().ToLower().Replace("smtp:","") -eq $normalized
+        }
+
+        return $results
+    }
+    catch {
+        Write-Log "Email lookup failed for $Email :: $($_.Exception.Message)" "WARN"
+        return $null
+    }
+}
 
 function Get-PrimaryGroupExternalEmail {
 
@@ -969,6 +988,59 @@ function Set-TargetMailContact {
     # -------------------- HYBRID LOOKUP --------------------
     $existing = $ExistingContact
 
+    # ------------------------------------------------------
+    # EMAIL-BASED ADOPTION (ONLY if no sync key match)
+    # ------------------------------------------------------
+    if (-not $existing -and $SeedTargetFromSource -eq 'None') {
+
+        $emailMatches = $null
+
+        if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($externalEmail)) {
+            $emailMatches = $existingContactsByEmail[$externalEmail]
+        }
+
+        if (-not $emailMatches) {
+            $emailMatches = Find-TargetContactByEmail -Email $externalEmail
+        }
+
+        if ($emailMatches -and $emailMatches.Count -gt 0) {
+
+            if ($emailMatches.Count -gt 1) {
+                Write-Log "Multiple contacts match email $externalEmail — skipping adoption for safety" "WARN"
+                return "Skipped"
+            }
+
+            $existing = $emailMatches | Select-Object -First 1
+
+            Write-Log "Adopting existing contact via email match: $externalEmail" "WARN"
+
+            if ($PSCmdlet.ShouldProcess($existing.Identity, "Adopt existing contact via email match")) {
+                Invoke-ExoWithRetry {
+                    Set-MailContact -Identity $existing.Identity -CustomAttribute15 $syncKey
+                }
+
+                try {
+                    $existing.CustomAttribute15 = $syncKey
+                }
+                catch { }
+
+                if ($ExistingContacts) {
+                    $ExistingContacts[$syncKey] = $existing
+                }
+
+                if ($existingContactsByEmail) {
+                    if (-not $existingContactsByEmail.ContainsKey($externalEmail)) {
+                        $existingContactsByEmail[$externalEmail] = @()
+                    }
+
+                    if (-not ($existingContactsByEmail[$externalEmail] | Where-Object { $_.Identity -eq $existing.Identity })) {
+                        $existingContactsByEmail[$externalEmail] += $existing
+                    }
+                }
+            }
+        }
+    }
+
     # ======================================================
     # ATTRIBUTE FILTER (RUN FIRST)
     # ======================================================
@@ -1108,6 +1180,59 @@ function Set-TargetMailContactFromGroup {
 
     # -------------------- HYBRID LOOKUP --------------------
     $existing = $ExistingContact
+
+    # ------------------------------------------------------
+    # EMAIL-BASED ADOPTION (GROUPS)
+    # ------------------------------------------------------
+    if (-not $existing -and $SeedTargetFromSource -eq 'None') {
+
+        $emailMatches = $null
+
+        if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($externalEmail)) {
+            $emailMatches = $existingContactsByEmail[$externalEmail]
+        }
+
+        if (-not $emailMatches) {
+            $emailMatches = Find-TargetContactByEmail -Email $externalEmail
+        }
+
+        if ($emailMatches -and $emailMatches.Count -gt 0) {
+
+            if ($emailMatches.Count -gt 1) {
+                Write-Log "Multiple group contacts match email $externalEmail — skipping adoption for safety" "WARN"
+                return "Skipped"
+            }
+
+            $existing = $emailMatches | Select-Object -First 1
+
+            Write-Log "Adopting existing GROUP contact via email match: $externalEmail" "WARN"
+
+            if ($PSCmdlet.ShouldProcess($existing.Identity, "Adopt existing group contact via email match")) {
+                Invoke-ExoWithRetry {
+                    Set-MailContact -Identity $existing.Identity -CustomAttribute15 $syncKey
+                }
+
+                try {
+                    $existing.CustomAttribute15 = $syncKey
+                }
+                catch { }
+
+                if ($ExistingContacts) {
+                    $ExistingContacts[$syncKey] = $existing
+                }
+
+                if ($existingContactsByEmail) {
+                    if (-not $existingContactsByEmail.ContainsKey($externalEmail)) {
+                        $existingContactsByEmail[$externalEmail] = @()
+                    }
+
+                    if (-not ($existingContactsByEmail[$externalEmail] | Where-Object { $_.Identity -eq $existing.Identity })) {
+                        $existingContactsByEmail[$externalEmail] += $existing
+                    }
+                }
+            }
+        }
+    }
 
     # ======================================================
     # ATTRIBUTE FILTER (RUN FIRST - CRITICAL)
@@ -1589,6 +1714,13 @@ New-Item -ItemType File -Path $script:LogFile -Force | Out-Null
 
 $stateFile = Get-StateFilePath -Config $config
 $state = Load-State -Path $stateFile
+
+$IsFirstRun = -not $state.UserDeltaLink -and -not $state.GroupDeltaLink
+
+if ($IsFirstRun) {
+    Write-Log "First run detected — skipping attribute hydration for performance" "WARN"
+}
+
 Write-Log "Loaded LastReconciliationUtc: $($state.LastReconciliationUtc)" "DEBUG"
 
 $servicePatterns = @()
@@ -1637,8 +1769,16 @@ if (-not ($state.PSObject.Properties.Name -contains 'LastReconciliationUtc')) {
 $RunReconciliation = $false
 $nowUtc = [DateTime]::UtcNow
 
-if ($ForceReconciliation) { Write-Log "ForceReconciliation switch detected — forcing reconciliation run" "WARN" ; $RunReconciliation = $true }
+if ($ForceReconciliation) {
+    Write-Log "ForceReconciliation switch detected — forcing reconciliation run" "WARN" 
+    $RunReconciliation = $true 
+}
 
+elseif ($IsFirstRun) {
+
+    Write-Log "First run detected — skipping reconciliation" "WARN"
+    $RunReconciliation = $false
+}
 
 elseif (-not $state.LastReconciliationUtc) {
 
@@ -1789,6 +1929,7 @@ try {
     Write-Log "Connected to Exchange Online target tenant."
 
     $existingContacts = $null
+    $existingContactsByEmail = $null
 
     if ($SeedTargetFromSource -ne 'None') { 
         Write-Log "Seed mode active — skipping target contact preload" "WARN"
@@ -1796,7 +1937,34 @@ try {
     } 
     elseif ($UseBulkLookup) { 
         $existingContacts = Get-ExistingTargetContacts -SourceTenantId $config.SourceTenantId 
-        Write-Log "Loaded $($existingContacts.Count) contacts (bulk mode)" 
+        Write-Log "Loaded $($existingContacts.Count) contacts (bulk mode)"
+        
+        $existingContactsByEmail = @{}
+        $seenContactIds = @{}
+
+        if ($existingContacts) {
+            foreach ($c in $existingContacts.Values) {
+
+                if (-not $c.Identity) { continue }
+
+                $identityKey = $c.Identity.ToString()
+                if ($seenContactIds.ContainsKey($identityKey)) { continue }
+                $seenContactIds[$identityKey] = $true
+
+                if ($c.ExternalEmailAddress) {
+                    $email = $c.ExternalEmailAddress.ToString().ToLower().Replace("smtp:","")
+
+                    if (-not $existingContactsByEmail.ContainsKey($email)) {
+                        $existingContactsByEmail[$email] = @()
+                    }
+
+                    $existingContactsByEmail[$email] += $c
+                }
+            }
+
+            Write-Log "Built email index: $($existingContactsByEmail.Count) unique addresses" "DEBUG"
+        }
+         
     } else { 
         Write-Log "Using ON-DEMAND lookup mode — no preload required" "INFO" 
         $existingContacts = $null 
@@ -1894,6 +2062,8 @@ try {
             $hasExtensionAttributes = $true
         }
 
+        if (-not $IsFirstRun) {
+
         if (-not $hasExtensionAttributes -or -not $item.onPremisesExtensionAttributes) {
 
             Write-Log "User attribute missing in delta payload — fetching full user: $($item.id)" "DEBUG"
@@ -1906,6 +2076,8 @@ try {
                 $item = $fullUser
             }
         }
+
+    }
 
         # Debug (keep until confirmed working)
         $debugValue = $null
@@ -2079,17 +2251,21 @@ try {
             $hasExtensionAttributes = $true
         }
 
-        if (-not $hasExtensionAttributes -or -not $group.onPremisesExtensionAttributes) {
+        if (-not $IsFirstRun) {
 
-            Write-Log "Group attribute missing in delta payload — fetching full group: $($group.id)" "DEBUG"
+            if (-not $hasExtensionAttributes -or -not $group.onPremisesExtensionAttributes) {
 
-            $fullGroup = Invoke-GraphJson `
-                -Uri "https://graph.microsoft.com/v1.0/groups/$($group.id)?`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,proxyAddresses,onPremisesExtensionAttributes" `
-                -AccessToken $graphToken
+                Write-Log "Group attribute missing in delta payload — fetching full group: $($group.id)" "DEBUG"
 
-            if ($fullGroup) {
-                $group = $fullGroup
+                $fullGroup = Invoke-GraphJson `
+                    -Uri "https://graph.microsoft.com/v1.0/groups/$($group.id)?`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,proxyAddresses,onPremisesExtensionAttributes" `
+                    -AccessToken $graphToken
+
+                if ($fullGroup) {
+                    $group = $fullGroup
+                }
             }
+
         }
 
         Write-Log "DEBUG PROXY: $($group.proxyAddresses)" "WARN"
@@ -2224,6 +2400,11 @@ try {
         }
 
         Write-Log "Saving state file to: $stateFile"
+
+        if ($IsFirstRun -and -not $state.LastReconciliationUtc) {
+            $state.LastReconciliationUtc = [DateTime]::UtcNow.ToString("o")
+            Write-Log "Initialized reconciliation timestamp on first run" "DEBUG"
+        }
 
         # ALWAYS persist state unless in test mode
         if ($TopUsers -eq 0) { 
