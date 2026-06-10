@@ -513,14 +513,12 @@ function Get-GroupDeltaChanges {
         [Parameter()][object[]]$AttributeFilters
     )
 
+    # DO NOT include filter-derived or complex properties in delta select
     $baseProps = @(
         'id','displayName','mail','securityEnabled','mailEnabled','groupTypes'
     )
 
-    $extraProps = Get-TopLevelSelectPropertiesFromAttributeFilters -AttributeFilters $AttributeFilters -ObjectType 'Group'
-    $allProps   = @($baseProps + $extraProps | Select-Object -Unique)
-
-    $select = [System.Web.HttpUtility]::UrlEncode(($allProps -join ','))
+    $select = [System.Web.HttpUtility]::UrlEncode(($baseProps -join ','))
 
     $uri = if ($DeltaLink) {
         $DeltaLink
@@ -535,22 +533,18 @@ function Get-GroupDeltaChanges {
     do {
         $page = Invoke-GraphJson -Uri $uri -AccessToken $AccessToken
 
-        $valueProp = $page.PSObject.Properties['value']
-        if ($valueProp -and $valueProp.Value) {
-            foreach ($item in $valueProp.Value) {
+        if ($page.value) {
+            foreach ($item in $page.value) {
                 $allChanges.Add($item)
             }
         }
 
-        $nextLinkProp  = $page.PSObject.Properties['@odata.nextLink']
-        $deltaLinkProp = $page.PSObject.Properties['@odata.deltaLink']
-
-        if ($nextLinkProp) {
-            $uri = $nextLinkProp.Value
+        if ($page.'@odata.nextLink') {
+            $uri = $page.'@odata.nextLink'
         }
-        elseif ($deltaLinkProp) {
+        elseif ($page.'@odata.deltaLink') {
+            $finalDeltaLink = $page.'@odata.deltaLink'
             $uri = $null
-            $finalDeltaLink = $deltaLinkProp.Value
         }
         else {
             Write-Log "WARNING: No nextLink or deltaLink returned by Graph (group delta)" "WARN"
