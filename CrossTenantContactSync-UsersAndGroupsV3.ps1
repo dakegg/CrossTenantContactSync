@@ -539,17 +539,11 @@ function Get-GroupDeltaChanges {
             }
         }
 
-        if ($page.'@odata.nextLink') {
-            $uri = $page.'@odata.nextLink'
-        }
-        elseif ($page.'@odata.deltaLink') {
-            $finalDeltaLink = $page.'@odata.deltaLink'
-            $uri = $null
-        }
-        else {
-            Write-Log "WARNING: No nextLink or deltaLink returned by Graph (group delta)" "WARN"
-            $uri = $null
-        }
+        $nextLinkProp = $page.PSObject.Properties['@odata.nextLink'] 
+        $deltaLinkProp = $page.PSObject.Properties['@odata.deltaLink'] 
+        if ($nextLinkProp) { $uri = $nextLinkProp.Value } 
+        elseif ($deltaLinkProp) { $finalDeltaLink = $deltaLinkProp.Value; $uri = $null }
+        else { Write-Log "WARNING: No nextLink or deltaLink returned by Graph (group delta)" "WARN"; $uri = $null }
 
     } while ($uri)
 
