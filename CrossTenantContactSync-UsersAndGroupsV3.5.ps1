@@ -6,94 +6,205 @@
     This script performs incremental (delta-based) synchronization of users and groups from a source tenant into Exchange Online mail contacts 
     in a target tenant. It is designed for cross-tenant collaboration scenarios such as GAL synchronization or external directory visibility.
 
-    The script uses Microsoft Graph delta queries to retrieve only changed objects since the last run. A state file is used to persist deltaLinks, 
-    enabling efficient incremental processing.
+    The script uses Microsoft Graph delta queries with explicit property selection to ensure:
+        - Efficient incremental processing
+        - No per-object Graph hydration calls
+        - AttributeFilters can be evaluated directly from delta payloads
+        - First-run correctness without requiring reconciliation
 
-    Key workflow:
+    Core architecture principles:
 
-        1. Load configuration (parameters and/or XML file)
-        2. Authenticate to Microsoft Graph (source tenant)
-        3. Run delta queries for users and/or groups
-        4. If no changes detected → exit early (no EXO connection), unless reconciliation is required
-        5. Determine processing mode (bulk vs. on-demand lookup)
-        6. Connect to Exchange Online (target tenant)
-        7. Retrieve existing contacts:
-            - Bulk mode: preload all contacts
-            - On-demand mode: lookup per object
-        8. Process changes:
-            - Create new contacts
-            - Update existing contacts (only when changes detected)
-            - Remove contacts for deleted objects (if enabled)
-        9. Apply AttributeFilters:
-            - Suppress or delete contacts based on source attributes
-       10. Run periodic reconciliation:
-            - Time-based (ReconciliationIntervalHours)
-            - Forced via -ForceReconciliation switch
-            - Batch validation of existing contacts against source objects
-            - Ensures attribute-based rules are eventually enforced
-            - Automatically forces contact preload when required
-       11. Persist updated deltaLinks and runtime state
+        - Fully delta-driven main processing pipeline
+        - No per-object Graph API calls during sync loops
+        - Dynamic Graph $select expansion based on AttributeFilters
+        - Safe handling of missing properties with debug visibility
+        - Batch-based reconciliation for long-term consistency
 
-    The script is optimized for large environments:
-        - Delta-driven processing
-        - Hybrid lookup model (bulk vs on-demand)
-        - Batched Graph reconciliation
-        - Minimal Exchange Online operations
+.PARAMETER ConfigXmlPath
+    Optional path to XML configuration file. Values from XML are merged with parameters.
+    Parameters take precedence.
+
+.PARAMETER SourceTenantId
+    Source tenant ID (GUID).
+
+.PARAMETER SourceTenantName
+    Friendly name used for display/logging.
+
+.PARAMETER SourceClientId
+    Graph App Registration Client ID.
+
+.PARAMETER SourceClientSecret
+    Graph App client secret.
+
+.PARAMETER TargetOrganization
+    Target Exchange Online org (usually *.onmicrosoft.com).
+
+.PARAMETER TargetTenantId
+    Target tenant ID (GUID).
+
+.PARAMETER TargetTenantName
+    Friendly name of target tenant.
+
+.PARAMETER TargetExoAppId
+    App ID for Exchange Online app-only auth.
+
+.PARAMETER TargetExoCertThumbprint
+    Certificate thumbprint for EXO auth.
+
+.PARAMETER StateRoot
+    Path for state (deltaLink) files.
+
+.PARAMETER LogRoot
+    Path for log files.
+
+.PARAMETER IncludeDomains
+    Allow-list of email domains.
+
+.PARAMETER ExcludeDomains
+    Block-list of email domains.
+
+.PARAMETER AppendSourceTenantToDisplayName
+    Appends source tenant name to displayName.
+
+.PARAMETER AllowUpnFallback
+    Allows UPN to be used when mail is missing.
+
+.PARAMETER DisableDeletes
+    Prevents deletion of contacts.
+
+.PARAMETER TopUsers
+    Limits number of processed objects (testing only).
+
+.PARAMETER LogLevel
+    Logging verbosity (0–3). Default = 3.
+    
+        0 = INFO only  
+        1 = INFO + ERROR  
+        2 = INFO + WARN + ERROR  
+        3 = ALL (DEBUG included)
+
+.PARAMETER ReconciliationIntervalHours
+    Interval for batch reconciliation.
+
+.PARAMETER ForceReconciliation
+    Forces reconciliation immediately.
+
+.PARAMETER SourceObjectType
+    User | Group | Both.
+
+.PARAMETER ForceFullSync
+    Forces delta reset (User / Group / Both).
+
+.PARAMETER SeedTargetFromSource
+    Controls seeding/adoption behavior.
+
+.PARAMETER ForceDisplayNameRefresh
+    Forces displayName updates.
+
+.BEHAVIOR
+
+    First Run:
+        - No state file required
+        - Full dataset returned by delta query
+        - AttributeFilters evaluated immediately
+        - No reconciliation executed
+        - Reconciliation timestamp initialized
+
+    Subsequent Runs:
+        - Only delta changes processed
+        - Reconciliation enforces long-term consistency
+
+.FILTERING MODEL
+
+    AttributeFilters:
+        - Evaluated directly from delta payload
+        - No per-object Graph calls required
+
+    Missing Properties:
+        - Logged at DEBUG level:
+            "FILTER PROPERTY MISSING: ..."
+
+.PERFORMANCE CHARACTERISTICS
+
+        - No per-object Graph API calls
+        - Single-pass delta processing
+        - Optional EXO bulk preload
+        - Batch reconciliation (Graph $batch)
+        - Minimal EXO writes
+
+.EXAMPLES
+
+    Standard run:
+        .\Sync.ps1 -ConfigXmlPath "C:\Temp\Config.xml"
+
+    Debug run:
+        .\Sync.ps1 -ConfigXmlPath "Config.xml" -LogLevel 3
+
+    Force full sync:
+        .\Sync.ps1 -ConfigXmlPath "Config.xml" -ForceFullSync Both
+
+    Force reconciliation:
+        .\Sync.ps1 -ConfigXmlPath "Config.xml" -ForceReconciliation
+
+.NOTES
+
+    Requirements:
+        - ExchangeOnlineManagement module
+        - Graph API permissions:
+            User.Read.All
+            Group.Read.All
+            Directory.Read.All (recommended)
+
+    Design:
+        - Fully delta-driven processing
+        - No Graph hydration
+        - First-run correctness without reconciliation
+        - Batch reconciliation for convergence
+
+    Limitations:
+        - Graph delta may omit selected properties in rare cases
+        - Missing properties are logged and skipped (no fallback fetch)
 
 .AUTHOR
     Darryl Kegg
 
 .VERSION
-    3.5.0
+    3.6.0
 
 .CHANGELOG
 
+    2026-06-10 – v3.6.0
+        * Eliminated all per-object Graph hydration calls from main sync loops
+        * Converted script to fully delta-driven processing model
+        * Ensured AttributeFilters apply on first run without reconciliation
+        * Added required filter properties (onPremisesExtensionAttributes) to delta $select
+        * Fixed group delta query to include dynamic $select expansion
+        * Added debug logging for missing Graph properties during filter evaluation
+        * Simplified first-run behavior (no hydration, no reconciliation)
+        * Improved reconciliation timestamp initialization
+
     2026-06-10 – v2.6.0
-        * Replaced run-count reconciliation with time-based model (ReconciliationIntervalHours)
-        * Added -ForceReconciliation switch for manual override
-        * Fixed early-exit logic to allow reconciliation when no delta changes are present
-        * Fixed inline PowerShell parsing issue in reconciliation trigger block
-        * Improved execution flow consistency for forced and scheduled reconciliation runs
-        * Clarified logging behavior and execution order
+        * Replaced run-count reconciliation with time-based model
+        * Added -ForceReconciliation switch
+        * Fixed early-exit logic for reconciliation scenarios
+        * Improved execution flow consistency
 
     2026-06-10 – v2.5.0
-        * Added LogLevel parameter for dynamic verbosity control
-        * Fixed delete logging to always display DisplayName and ExternalEmailAddress
-        * Implemented full M365 (Unified) group support
-        * Added proxyAddresses fallback for group email resolution
-        * Added proxyAddresses to group Graph hydration and reconciliation queries
-        * Improved safe property access for all Graph objects (StrictMode compliant)
-        * Introduced unified batch reconciliation engine (users + groups)
-        * Added forced contact preload for reconciliation in ON-DEMAND mode
-        * Improved delete logic to work consistently across bulk and on-demand lookup modes
+        * Added LogLevel parameter
+        * Implemented unified batch reconciliation engine
+        * Added proxyAddresses fallback for groups
+        * Improved EXO lookup models and delete handling
 
     2026-06-10 – v2.4.0
-        * Added XML-driven AttributeFilters for users and groups
-        * Added nested property evaluation for Graph delta objects
-        * Added dynamic Graph select expansion based on filters
-        * Added attribute-based suppression/removal of contacts
+        * Added XML-driven AttributeFilters
+        * Implemented nested property evaluation
+        * Added dynamic Graph $select expansion
 
     2026-06-09 – v2.3.0
-        * Added write optimization (skip no-op updates)
-        * Implemented status return model (Created / Updated / Unchanged / Skipped)
-        * Enhanced logging with change reasoning
+        * Added write optimization
+        * Improved logging and update detection
         * Fixed group delta StrictMode issues
-        * Improved delete logic across hybrid lookup modes
 
-.NOTES
-    Requirements:
-        - ExchangeOnlineManagement module
-        - Microsoft Graph API permissions (User.Read.All, Group.Read.All)
-        - Certificate-based Exchange Online authentication
-
-    Behavior:
-        - Delta-based incremental sync
-        - Hybrid contact lookup model
-        - ProxyAddresses fallback for M365 groups
-        - Attribute-based filtering and deletion
-        - Time-based and on-demand reconciliation
-        - LogLevel-controlled output
-        - StrictMode enforced for reliability
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
