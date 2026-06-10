@@ -467,7 +467,7 @@ function Get-UserDeltaChanges {
     $baseProps = @(
         'id','displayName','givenName','surname','mail','userPrincipalName',
         'companyName','department','jobTitle','businessPhones','mobilePhone',
-        'officeLocation'
+        'officeLocation','onPremisesExtensionAttributes'
     )
 
     $extraProps = Get-TopLevelSelectPropertiesFromAttributeFilters -AttributeFilters $AttributeFilters -ObjectType 'User'
@@ -526,10 +526,18 @@ function Get-GroupDeltaChanges {
 
     # DO NOT include filter-derived or complex properties in delta select
     $baseProps = @(
-        'id','displayName','mail','securityEnabled','mailEnabled','groupTypes'
+        'id','displayName','mail','securityEnabled','mailEnabled','groupTypes', 'proxyAddresses','onPremisesExtensionAttributes'
+
     )
 
-    $select = [System.Web.HttpUtility]::UrlEncode(($baseProps -join ','))
+    $extraProps = Get-TopLevelSelectPropertiesFromAttributeFilters -AttributeFilters $AttributeFilters -ObjectType 'Group'
+    
+    $allProps = @(
+        $baseProps +
+        $extraProps
+    ) | Select-Object -Unique
+
+    $select = [System.Web.HttpUtility]::UrlEncode(($allProps -join ','))
 
     $uri = if ($DeltaLink) {
         $DeltaLink
@@ -764,8 +772,12 @@ function Test-AttributeFilterMatch {
         # Debug logging (keep this while validating)
         Write-Log "DEBUG FILTER RAW: Property='$propertyPath' Actual='$actual' Expected='$expected'" "DEBUG"
 
-        if ($null -eq $actual) { continue }
-
+        #if ($null -eq $actual) { continue }
+        if ($null -eq $actual) {
+            Write-Log "FILTER PROPERTY MISSING: Property='$propertyPath' ObjectType='$ObjectType'" "DEBUG"
+            continue
+        }
+        
         # Normalize values (this is critical)
         $actualString   = ([string]$actual).Trim().ToLowerInvariant()
         $expectedString = ([string]$expected).Trim().ToLowerInvariant()
@@ -1105,14 +1117,14 @@ function Set-TargetMailContact {
                 Write-Log "Forcing displayName refresh: $displayName" "WARN" 
             } 
             else { 
-                Write-Log "Updating contact: Identity=$identity Email=$externalEmail SyncKey=$syncKey" 
+                Write-Log "Updating contact: Identity=$identity Email=$externalEmail SyncKey=$syncKey" "DEBUG"
             }
 
             Invoke-ExoWithRetry {
                 Set-MailContact -Identity $identity -DisplayName $displayName -ExternalEmailAddress $externalEmail -CustomAttribute15 $syncKey
             }
 
-            Write-Log "Updated contact: $displayName <$externalEmail> [$syncKey]"
+            Write-Log "Updated contact: $displayName <$externalEmail> [$syncKey]" "INFO"
             return "Updated"
         }
 
@@ -1718,7 +1730,7 @@ $state = Load-State -Path $stateFile
 $IsFirstRun = -not $state.UserDeltaLink -and -not $state.GroupDeltaLink
 
 if ($IsFirstRun) {
-    Write-Log "First run detected — skipping attribute hydration for performance" "WARN"
+    Write-Log "First run detected" "WARN"
 }
 
 Write-Log "Loaded LastReconciliationUtc: $($state.LastReconciliationUtc)" "DEBUG"
@@ -2056,6 +2068,7 @@ try {
         # FIX: SAFE PROPERTY CHECK + HYDRATION
         # =========================================================
 
+<#
         $hasExtensionAttributes = $false
 
         if ($item.PSObject.Properties.Name -contains 'onPremisesExtensionAttributes') {
@@ -2075,7 +2088,7 @@ try {
             if ($fullUser) {
                 $item = $fullUser
             }
-        }
+        } #>
 
     }
 
@@ -2229,9 +2242,6 @@ try {
             continue
         }
 
-####
-
-
         Write-Log "Processing group: $($group.id)" "DEBUG"
 
         # -------------------- SCOPE CHECK --------------------
@@ -2244,7 +2254,7 @@ try {
         # =========================================================
         # FIX: SAFE PROPERTY CHECK + HYDRATION
         # =========================================================
-
+<#
         $hasExtensionAttributes = $false
 
         if ($group.PSObject.Properties.Name -contains 'onPremisesExtensionAttributes') {
@@ -2264,7 +2274,7 @@ try {
                 if ($fullGroup) {
                     $group = $fullGroup
                 }
-            }
+            } #>
 
         }
 
