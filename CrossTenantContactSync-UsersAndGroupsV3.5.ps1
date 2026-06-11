@@ -254,6 +254,8 @@ param(
     [int]$LogLevel = 3,
     [int]$ReconciliationIntervalHours = 8,
     [switch]$ForceReconciliation,
+    [int]$MaxUserResults  = 0,
+    [int]$MaxGroupResults = 0,
 
     # Source object type
     [ValidateSet('User','Group','Both')]
@@ -619,7 +621,8 @@ function Get-UserDeltaChanges {
     param(
         [Parameter(Mandatory)][string]$AccessToken,
         [Parameter()][string]$DeltaLink,
-        [Parameter()][object[]]$AttributeFilters
+        [Parameter()][object[]]$AttributeFilters,
+        [Parameter()][int]$MaxResults = 0
     )
 
     $baseProps = @(
@@ -643,7 +646,7 @@ function Get-UserDeltaChanges {
     $allChanges = New-Object System.Collections.Generic.List[object]
     $finalDeltaLink = $null
 
-    do {
+    <# do {
         $page = Invoke-GraphJson -Uri $uri -AccessToken $AccessToken
 
         $valueProp = $page.PSObject.Properties['value']
@@ -667,7 +670,43 @@ function Get-UserDeltaChanges {
             Write-Log "WARNING: No nextLink or deltaLink returned by Graph" "WARN"
             $uri = $null
         }
-    } while ($uri)
+    } while ($uri) #>
+
+    do {
+    $page = Invoke-GraphJson -Uri $uri -AccessToken $AccessToken
+
+    $valueProp = $page.PSObject.Properties['value']
+    if ($valueProp -and $valueProp.Value) {
+
+        foreach ($item in $valueProp.Value) {
+
+            if ($MaxResults -gt 0 -and $allChanges.Count -ge $MaxResults) {
+                Write-Log "MaxResults limit reached ($MaxResults) - stopping delta paging early" "WARN"
+                $uri = $null
+                break
+            }
+
+            $allChanges.Add($item)
+        }
+    }
+
+    if (-not $uri) { break }
+
+    $nextLinkProp = $page.PSObject.Properties['@odata.nextLink']
+    $deltaLinkProp = $page.PSObject.Properties['@odata.deltaLink']
+
+    if ($nextLinkProp -and ($MaxResults -eq 0 -or $allChanges.Count -lt $MaxResults)) {
+        $uri = $nextLinkProp.Value
+    }
+    elseif ($deltaLinkProp) {
+        $uri = $null
+        $finalDeltaLink = $deltaLinkProp.Value
+    }
+    else {
+        $uri = $null
+    }
+
+} while ($uri)
 
     return [pscustomobject]@{
         Changes   = $allChanges
@@ -679,7 +718,8 @@ function Get-GroupDeltaChanges {
     param(
         [Parameter(Mandatory)][string]$AccessToken,
         [Parameter()][string]$DeltaLink,
-        [Parameter()][object[]]$AttributeFilters
+        [Parameter()][object[]]$AttributeFilters,
+        [Parameter()][int]$MaxResults = 0
     )
 
     # DO NOT include filter-derived or complex properties in delta select
@@ -716,7 +756,7 @@ function Get-GroupDeltaChanges {
     $allChanges = New-Object System.Collections.Generic.List[object]
     $finalDeltaLink = $null
 
-    do {
+    <# do {
         $page = Invoke-GraphJson -Uri $uri -AccessToken $AccessToken
 
         if ($page.value) {
@@ -731,7 +771,44 @@ function Get-GroupDeltaChanges {
         elseif ($deltaLinkProp) { $finalDeltaLink = $deltaLinkProp.Value; $uri = $null }
         else { Write-Log "WARNING: No nextLink or deltaLink returned by Graph (group delta)" "WARN"; $uri = $null }
 
+    } while ($uri) #>
+
+    do {
+        $page = Invoke-GraphJson -Uri $uri -AccessToken $AccessToken
+
+        if ($page.value) {
+
+            foreach ($item in $page.value) {
+
+                if ($MaxResults -gt 0 -and $allChanges.Count -ge $MaxResults) {
+                    Write-Log "Group MaxResults limit reached ($MaxResults) — stopping delta paging early" "WARN"
+                    $uri = $null
+                    break
+                }
+
+                $allChanges.Add($item)
+            }
+        }
+
+        if (-not $uri) { break }
+
+        $nextLinkProp  = $page.PSObject.Properties['@odata.nextLink']
+        $deltaLinkProp = $page.PSObject.Properties['@odata.deltaLink']
+
+        if ($nextLinkProp -and ($MaxResults -eq 0 -or $allChanges.Count -lt $MaxResults)) {
+            $uri = $nextLinkProp.Value
+        }
+        elseif ($deltaLinkProp) {
+            $finalDeltaLink = $deltaLinkProp.Value
+            $uri = $null
+        }
+        else {
+            Write-Log "WARNING: No nextLink or deltaLink returned by Graph (group delta)" "WARN"
+            $uri = $null
+        }
+
     } while ($uri)
+
 
     return [pscustomobject]@{
         Changes   = $allChanges
@@ -789,9 +866,9 @@ function Resolve-RecipientConflictByEmail {
         [Parameter(Mandatory)][string]$Email
     )
 
-    $allRecipients = Find-ExistingRecipientByEmail -Email $Email
+    $allRecipients = @(Find-ExistingRecipientByEmail -Email $Email)
 
-    if (-not $allRecipients -or $allRecipients.Count -eq 0) {
+    if ($allRecipients.Count -eq 0) {
         return [pscustomobject]@{
             ConflictFound = $false
             RecipientType = $null
@@ -809,7 +886,7 @@ function Resolve-RecipientConflictByEmail {
         }
     }
 
-    $recipient = $allRecipients | Select-Object -First 1
+    $recipient = $allRecipients[0]
 
     Write-Log "Recipient conflict found for $Email :: Type=$($recipient.RecipientType) Identity=$($recipient.Identity) PrimarySmtp=$($recipient.PrimarySmtpAddress)" "WARN"
 
@@ -1131,17 +1208,18 @@ function Find-ExistingRecipientByEmail {
     )
 
     $normalized = $Email.Trim().ToLowerInvariant()
-
     try {
-        # Broad recipient lookup first
-        $matches = Get-Recipient -ResultSize Unlimited | Where-Object {
-            $_.EmailAddresses -and (
-                $_.EmailAddresses | ForEach-Object { $_.ToString().ToLowerInvariant() }
-            ) -contains ("smtp:$normalized")
+        try {
+            $matches = Get-Recipient -ResultSize Unlimited -Filter "EmailAddresses -eq 'smtp:$normalized'"
+        }
+        catch {
+            Write-Log "Recipient lookup failed for $Email :: $($_.Exception.Message)" "WARN"
+            return @()
         }
 
         return @($matches)
-    }
+
+        }
     catch {
         Write-Log "Recipient lookup failed for $Email :: $($_.Exception.Message)" "WARN"
         return @()
@@ -1238,9 +1316,8 @@ function Set-TargetMailContact {
             $emailMatches = $existingContactsByEmail[$externalEmail]
         }
 
-        if (-not $emailMatches) {
-            $emailMatches = Find-TargetContactByEmail -Email $externalEmail
-        }
+        # if (-not $emailMatches) { $emailMatches = Find-TargetContactByEmail -Email $externalEmail }
+        $emailMatches = @()
 
         if ($emailMatches -and $emailMatches.Count -gt 0) {
 
@@ -1387,7 +1464,14 @@ else {
 
                     Write-Log "Found existing MailContact with same SMTP — adopting instead of creating: $externalEmail" "WARN"
 
-                    $existingContact = Find-TargetContactByEmail -Email $externalEmail | Select-Object -First 1
+                    #$existingContact = Find-TargetContactByEmail -Email $externalEmail | Select-Object -First 1
+                    $key = $externalEmail.Trim().ToLowerInvariant()
+                    $existingContact = $null
+
+                    if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($key)) {
+                        $existingContact = $existingContactsByEmail[$key] | Select-Object -First 1
+                    }
+
 
                     if ($existingContact) {
 
@@ -1479,9 +1563,8 @@ function Set-TargetMailContactFromGroup {
             $emailMatches = $existingContactsByEmail[$externalEmail]
         }
 
-        if (-not $emailMatches) {
-            $emailMatches = Find-TargetContactByEmail -Email $externalEmail
-        }
+        #if (-not $emailMatches) {$emailMatches = Find-TargetContactByEmail -Email $externalEmail }
+        $emailMatches = @()
 
         if ($emailMatches -and $emailMatches.Count -gt 0) {
 
@@ -1643,7 +1726,14 @@ function Set-TargetMailContactFromGroup {
 
                     Write-Log "Adopting existing GROUP MailContact due to SMTP match: $externalEmail" "WARN"
 
-                    $existingContact = Find-TargetContactByEmail -Email $externalEmail | Select-Object -First 1
+                    #$existingContact = Find-TargetContactByEmail -Email $externalEmail | Select-Object -First 1
+                    $key = $externalEmail.Trim().ToLowerInvariant()
+                    $existingContact = $null
+
+                    if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($key)) {
+                        $existingContact = $existingContactsByEmail[$key] | Select-Object -First 1
+                    }
+
 
                     if ($existingContact) {
 
@@ -2167,7 +2257,7 @@ if (-not ($state.PSObject.Properties.Name -contains 'LastReconciliationUtc')) {
 }
 
 $RunReconciliation = $false
-$nowUtc = [DateTime]::UtcNow
+$nowUtc = [DateTimeOffset]::UtcNow
 
 if ($ForceReconciliation) {
     Write-Log "ForceReconciliation switch detected — forcing reconciliation run" "WARN" 
@@ -2188,8 +2278,12 @@ elseif (-not $state.LastReconciliationUtc) {
 else {
 
     try {
-        $lastRecon = [DateTime]::Parse($state.LastReconciliationUtc)
+        #$lastRecon = [DateTime]::Parse($state.LastReconciliationUtc)
+        $lastRecon = [DateTimeOffset]::Parse($state.LastReconciliationUtc)
+
         $elapsedHours = ($nowUtc - $lastRecon).TotalHours
+
+        Write-Log "Reconciliation timing: last=$($lastRecon.UtcDateTime) now=$($nowUtc.UtcDateTime) elapsedHours=$([math]::Round($elapsedHours,2))" "DEBUG"
 
         # ---------------------------------------------------------
         # Max age override (force reconciliation if too old)
@@ -2261,7 +2355,8 @@ try {
     if ($config.SourceObjectType -in @('User','Both')) {
 
         #$userDeltaResult = Get-UserDeltaChanges -AccessToken $graphToken -DeltaLink $state.UserDeltaLink
-        $userDeltaResult = Get-UserDeltaChanges -AccessToken $graphToken -DeltaLink $state.UserDeltaLink -AttributeFilters $config.AttributeFilters
+        # $userDeltaResult = Get-UserDeltaChanges -AccessToken $graphToken -DeltaLink $state.UserDeltaLink -AttributeFilters $config.AttributeFilters
+        $userDeltaResult = Get-UserDeltaChanges -AccessToken $graphToken -DeltaLink $state.UserDeltaLink -AttributeFilters $config.AttributeFilters -maxresults $MaxUserResults
 
         if ($userDeltaResult -and $userDeltaResult.Changes) {
             $userChangeCount = $userDeltaResult.Changes.Count
@@ -2274,7 +2369,8 @@ try {
     if ($config.SourceObjectType -in @('Group','Both')) {
 
         #$groupDeltaResult = Get-GroupDeltaChanges -AccessToken $graphToken -DeltaLink $state.GroupDeltaLink
-        $groupDeltaResult = Get-GroupDeltaChanges -AccessToken $graphToken -DeltaLink $state.GroupDeltaLink -AttributeFilters $config.AttributeFilters
+        #$groupDeltaResult = Get-GroupDeltaChanges -AccessToken $graphToken -DeltaLink $state.GroupDeltaLink -AttributeFilters $config.AttributeFilters
+        $groupDeltaResult = Get-GroupDeltaChanges -AccessToken $graphToken -DeltaLink $state.GroupDeltaLink -AttributeFilters $config.AttributeFilters -MaxResults $MaxGroupResults
 
         if ($groupDeltaResult -and $groupDeltaResult.Changes) {
             $groupChangeCount = $groupDeltaResult.Changes.Count
@@ -2316,8 +2412,12 @@ try {
 
     # Threshold — tune this (10–50 recommended)
     $BulkThreshold = 25
-
-    if ($TotalChangeCount -ge $BulkThreshold) {
+    
+    if ($MaxUserResults -gt 0 -or $MaxGroupResults -gt 0) {
+        Write-Log "Test mode detected — forcing BULK lookup mode" "WARN"
+        $UseBulkLookup = $true
+    }
+    elseif ($TotalChangeCount -ge $BulkThreshold) {
         $UseBulkLookup = $true
         Write-Log "Using BULK contact preload mode (changes: $TotalChangeCount)" "INFO"
     }
