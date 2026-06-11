@@ -1361,7 +1361,7 @@ function Set-TargetMailContact {
     # ATTRIBUTE FILTER (RUN FIRST)
     # ======================================================
 
-    $matchedUserAttributeFilter = Test-AttributeFilterMatch `
+    <#$matchedUserAttributeFilter = Test-AttributeFilterMatch `
         -InputObject $User `
         -AttributeFilters $Config.AttributeFilters `
         -ObjectType 'User'
@@ -1385,7 +1385,7 @@ function Set-TargetMailContact {
             Write-Log "Filter matched but no existing contact found: $syncKey" "DEBUG"
             return "Skipped"
         }
-    }
+    } #>
 
     # ======================================================
     # NORMAL PROCESSING (ONLY IF NOT FILTERED)
@@ -1608,7 +1608,7 @@ function Set-TargetMailContactFromGroup {
     # ATTRIBUTE FILTER (RUN FIRST - CRITICAL)
     # ======================================================
 
-    $matchedGroupAttributeFilter = Test-AttributeFilterMatch `
+   <# $matchedGroupAttributeFilter = Test-AttributeFilterMatch `
         -InputObject $Group `
         -AttributeFilters $Config.AttributeFilters `
         -ObjectType 'Group'
@@ -1632,7 +1632,7 @@ function Set-TargetMailContactFromGroup {
             Write-Log "Filter matched but no existing group contact found: $syncKey" "DEBUG"
             return "Skipped"
         }
-    }
+    } #>
 
     # ======================================================
     # UPDATE EXISTING
