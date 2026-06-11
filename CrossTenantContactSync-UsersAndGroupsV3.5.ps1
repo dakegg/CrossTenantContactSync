@@ -556,14 +556,61 @@ function Invoke-GraphJson {
     }
 
     try {
-        #Write-Log "GRAPH GET: $Uri" "DEBUG"
-        return Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers
+        return Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers -ErrorAction Stop
     }
     catch {
-        $responseBody = $_.ErrorDetails.Message
+        $responseBody = $null
+        $exceptionMessage = $null
+
+        if ($_.Exception -and $_.Exception.Message) {
+            $exceptionMessage = $_.Exception.Message
+        }
+        else {
+            $exceptionMessage = ($_ | Out-String).Trim()
+        }
+
+        # Safely extract ErrorDetails
+        if ($_.PSObject.Properties['ErrorDetails'] -and $null -ne $_.ErrorDetails) {
+
+            if ($_.ErrorDetails -is [string]) {
+                $responseBody = $_.ErrorDetails
+            }
+            elseif ($_.ErrorDetails.PSObject.Properties['Message']) {
+                $responseBody = $_.ErrorDetails.Message
+            }
+            else {
+                $responseBody = ($_.ErrorDetails | Out-String).Trim()
+            }
+        }
+
+        # Fallback: try to read raw web response body
+        if (-not $responseBody -and $_.Exception -and $_.Exception.Response) {
+            try {
+                $stream = $_.Exception.Response.GetResponseStream()
+                if ($stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    try {
+                        $responseBody = $reader.ReadToEnd()
+                    }
+                    finally {
+                        $reader.Dispose()
+                        $stream.Dispose()
+                    }
+                }
+            }
+            catch {
+                # swallow fallback parsing failure
+            }
+        }
+
+        if (-not $responseBody) {
+            $responseBody = "<no response body available>"
+        }
+
         Write-Log "GRAPH GET FAILED: $Uri" "ERROR"
-        Write-Log "GRAPH ERROR: $($_.Exception.Message)" "ERROR"
+        Write-Log "GRAPH ERROR: $exceptionMessage" "ERROR"
         Write-Log "GRAPH RAW RESPONSE: $responseBody" "ERROR"
+
         throw
     }
 }
@@ -637,16 +684,25 @@ function Get-GroupDeltaChanges {
 
     # DO NOT include filter-derived or complex properties in delta select
     $baseProps = @(
-        'id','displayName','mail','securityEnabled','mailEnabled','groupTypes', 'proxyAddresses','onPremisesExtensionAttributes'
+        'id','displayName','mail','securityEnabled','mailEnabled','groupTypes', 'proxyAddresses'
 
     )
 
     $extraProps = Get-TopLevelSelectPropertiesFromAttributeFilters -AttributeFilters $AttributeFilters -ObjectType 'Group'
-    
+
+    #Strip unsupported properties for GROUP DELTA ONLY
+    $extraProps = $extraProps | Where-Object { $_ -ne 'onPremisesExtensionAttributes' }
+
     $allProps = @(
         $baseProps +
         $extraProps
     ) | Select-Object -Unique
+
+    if ($allProps -contains 'onPremisesExtensionAttributes') {
+        Write-Log "WARNING: removing unsupported property 'onPremisesExtensionAttributes' from group delta select" "WARN"
+        $allProps = $allProps | Where-Object { $_ -ne 'onPremisesExtensionAttributes' }
+    }
+
 
     $select = [System.Web.HttpUtility]::UrlEncode(($allProps -join ','))
 
@@ -728,22 +784,58 @@ function Test-GroupInScope {
     return $false
 }
 
+function Resolve-RecipientConflictByEmail {
+    param(
+        [Parameter(Mandatory)][string]$Email
+    )
+
+    $allRecipients = Find-ExistingRecipientByEmail -Email $Email
+
+    if (-not $allRecipients -or $allRecipients.Count -eq 0) {
+        return [pscustomobject]@{
+            ConflictFound = $false
+            RecipientType = $null
+            Recipient     = $null
+        }
+    }
+
+    if ($allRecipients.Count -gt 1) {
+        Write-Log "Multiple recipient conflicts found for $Email. Count=$($allRecipients.Count)" "WARN"
+
+        return [pscustomobject]@{
+            ConflictFound = $true
+            RecipientType = 'Multiple'
+            Recipient     = $allRecipients
+        }
+    }
+
+    $recipient = $allRecipients | Select-Object -First 1
+
+    Write-Log "Recipient conflict found for $Email :: Type=$($recipient.RecipientType) Identity=$($recipient.Identity) PrimarySmtp=$($recipient.PrimarySmtpAddress)" "WARN"
+
+    return [pscustomobject]@{
+        ConflictFound = $true
+        RecipientType = $recipient.RecipientType
+        Recipient     = $recipient
+    }
+}
+
 function Find-TargetContactByEmail {
     param([Parameter(Mandatory)][string]$Email)
 
     try {
-        $normalized = $Email.ToLower()
+        $normalized = $Email.Trim().ToLowerInvariant()
 
         $results = Get-MailContact -ResultSize Unlimited | Where-Object {
             $_.ExternalEmailAddress -and
-            $_.ExternalEmailAddress.ToString().ToLower().Replace("smtp:","") -eq $normalized
+            $_.ExternalEmailAddress.ToString().ToLowerInvariant().Replace("smtp:","") -eq $normalized
         }
 
-        return $results
+        return @($results)
     }
     catch {
-        Write-Log "Email lookup failed for $Email :: $($_.Exception.Message)" "WARN"
-        return $null
+        Write-Log "MailContact lookup failed for $Email :: $($_.Exception.Message)" "WARN"
+        return @()
     }
 }
 
@@ -793,6 +885,7 @@ function Get-TopLevelSelectPropertiesFromAttributeFilters {
     $props = New-Object System.Collections.Generic.List[string]
 
     foreach ($filter in @($AttributeFilters)) {
+
         if (-not $filter) { continue }
 
         $filterObjectType = if ($filter.ObjectType) { [string]$filter.ObjectType } else { 'Both' }
@@ -1032,6 +1125,29 @@ function Get-DisplayNameForTarget {
 
 # -------------------- Exchange target side --------------------
 
+function Find-ExistingRecipientByEmail {
+    param(
+        [Parameter(Mandatory)][string]$Email
+    )
+
+    $normalized = $Email.Trim().ToLowerInvariant()
+
+    try {
+        # Broad recipient lookup first
+        $matches = Get-Recipient -ResultSize Unlimited | Where-Object {
+            $_.EmailAddresses -and (
+                $_.EmailAddresses | ForEach-Object { $_.ToString().ToLowerInvariant() }
+            ) -contains ("smtp:$normalized")
+        }
+
+        return @($matches)
+    }
+    catch {
+        Write-Log "Recipient lookup failed for $Email :: $($_.Exception.Message)" "WARN"
+        return @()
+    }
+}
+
 function Connect-TargetExchange {
     param([Parameter(Mandatory)][object]$Config)
 
@@ -1240,7 +1356,7 @@ function Set-TargetMailContact {
         }
 
     }
-    else {
+else {
 
         if ($PSCmdlet.ShouldProcess($displayName, "Create target mail contact")) {
 
@@ -1257,10 +1373,58 @@ function Set-TargetMailContact {
                 $Name = $Name.Substring(0,64)
             }
 
+            # ------------------------------------------------------
+            # PRE-CREATE RECIPIENT CONFLICT CHECK
+            # ------------------------------------------------------
+            $recipientConflict = Resolve-RecipientConflictByEmail -Email $externalEmail
+
+            if ($recipientConflict.ConflictFound) {
+
+                $recipient = $recipientConflict.Recipient
+                $recipientType = $recipientConflict.RecipientType
+
+                if ($recipientType -eq 'MailContact') {
+
+                    Write-Log "Found existing MailContact with same SMTP — adopting instead of creating: $externalEmail" "WARN"
+
+                    $existingContact = Find-TargetContactByEmail -Email $externalEmail | Select-Object -First 1
+
+                    if ($existingContact) {
+
+                        Invoke-ExoWithRetry {
+                            Set-MailContact `
+                                -Identity $existingContact.Identity `
+                                -DisplayName $displayName `
+                                -ExternalEmailAddress $externalEmail `
+                                -CustomAttribute15 $syncKey
+                        }
+
+                        Write-Log "Adopted existing contact: $displayName <$externalEmail> [$syncKey]" "INFO"
+                        return "Updated"
+                    }
+                    else {
+                        Write-Log "Recipient conflict reported MailContact but Get-MailContact could not resolve it: $externalEmail" "WARN"
+                        return "Skipped"
+                    }
+                }
+                else {
+                    Write-Log ("Cannot create MailContact — SMTP already owned by {0}: {1}" -f $recipientType, $externalEmail) "WARN"
+                    return "Skipped"
+                }
+            }
+
             Write-Log "Creating contact: Name=$Name DisplayName=$displayName Alias=$alias Email=$externalEmail SyncKey=$syncKey"
 
-            $new = Invoke-ExoWithRetry {
-                New-MailContact -Name $Name -DisplayName $displayName -Alias $alias -ExternalEmailAddress $externalEmail
+            $new = $null
+
+            try {
+                $new = Invoke-ExoWithRetry {
+                    New-MailContact -Name $Name -DisplayName $displayName -Alias $alias -ExternalEmailAddress $externalEmail
+                }
+            }
+            catch {
+                Write-Log "Create failed for $displayName <$externalEmail> :: $($_.Exception.Message)" "ERROR"
+                return "Skipped"
             }
 
             if (-not $new -or -not $new.Identity) {
@@ -1272,7 +1436,7 @@ function Set-TargetMailContact {
                 Set-MailContact -Identity $new.Identity -CustomAttribute15 $syncKey
             }
 
-            Write-Log "Created contact: $displayName <$externalEmail> [$syncKey]"
+            Write-Log "Created contact: $displayName <$externalEmail> [$syncKey]" "INFO"
             return "Created"
         }
     }
@@ -1440,6 +1604,10 @@ function Set-TargetMailContactFromGroup {
     # CREATE NEW
     # ======================================================
 
+    # ======================================================
+    # CREATE NEW (WITH CONFLICT HANDLING)
+    # ======================================================
+
     else {
 
         if ($PSCmdlet.ShouldProcess($displayName, "Create group contact")) {
@@ -1451,12 +1619,73 @@ function Set-TargetMailContactFromGroup {
             }
 
             $uniqueSuffix = ($Group.id -replace '-', '').Substring(0,16)
-
             $Name = "$shortName-$uniqueSuffix"
 
             if ($Name.Length -gt 64) {
                 $Name = $Name.Substring(0,64)
             }
+
+            # ------------------------------------------------------
+            # PRE-CREATE RECIPIENT CONFLICT CHECK (CRITICAL)
+            # ------------------------------------------------------
+
+            $recipientConflict = Resolve-RecipientConflictByEmail -Email $externalEmail
+
+            if ($recipientConflict.ConflictFound) {
+
+                $recipient     = $recipientConflict.Recipient
+                $recipientType = $recipientConflict.RecipientType
+
+                # ------------------------------------------------------
+                # CASE 1: EXISTING MAILCONTACT → ADOPT
+                # ------------------------------------------------------
+                if ($recipientType -eq 'MailContact') {
+
+                    Write-Log "Adopting existing GROUP MailContact due to SMTP match: $externalEmail" "WARN"
+
+                    $existingContact = Find-TargetContactByEmail -Email $externalEmail | Select-Object -First 1
+
+                    if ($existingContact) {
+
+                        Invoke-ExoWithRetry {
+                            Set-MailContact `
+                                -Identity $existingContact.Identity `
+                                -DisplayName $displayName `
+                                -ExternalEmailAddress $externalEmail `
+                                -CustomAttribute15 $syncKey
+                        }
+
+                        Write-Log "Adopted existing group contact: $displayName <$externalEmail> [$syncKey]" "INFO"
+                        return "Updated"
+                    }
+                    else {
+                        Write-Log "Conflict reported MailContact but lookup failed for $externalEmail" "WARN"
+                        return "Skipped"
+                    }
+                }
+
+                # ------------------------------------------------------
+                # CASE 2: MULTIPLE MATCHES → SKIP
+                # ------------------------------------------------------
+                elseif ($recipientType -eq 'Multiple') {
+
+                    Write-Log "Multiple recipient conflict detected — skipping group creation: $externalEmail" "WARN"
+                    return "Skipped"
+                }
+
+                # ------------------------------------------------------
+                # CASE 3: NON-CONTACT RECIPIENT → SKIP (CRITICAL)
+                # ------------------------------------------------------
+                else {
+
+                    Write-Log ("Cannot create MailContact — SMTP already owned by {0}: {1}" -f $recipientType, $externalEmail) "WARN"
+                    return "Skipped"
+                }
+            }
+
+            # ------------------------------------------------------
+            # SAFE TO CREATE
+            # ------------------------------------------------------
 
             Write-Log "Creating group contact: Name=$Name DisplayName=$displayName Email=$externalEmail SyncKey=$syncKey"
 
@@ -1571,7 +1800,7 @@ function Get-SafeAlias {
     if ($alias.Length -gt 64) { $alias = $alias.Substring(0,64) } 
     return $alias }
 
-function Invoke-ExoWithRetry { 
+function Invoke-ExoWithRetry {
     param( 
         [scriptblock]$ScriptBlock, 
         [int]$MaxRetries = 3, 
@@ -1583,14 +1812,34 @@ function Invoke-ExoWithRetry {
             return & $ScriptBlock 
         } 
         catch {
-            $msg = $_.Exception.Message 
+            $msg = $_.Exception.Message
+
+            # Non-transient / deterministic failures: do not retry
+            $nonTransientPatterns = @(
+                'proxy address.*already being used',
+                'ProxyAddressExistsException',
+                'is already being used by the proxy addresses',
+                'cannot find object',
+                'doesn''t exist',
+                'is not unique',
+                'invalid',
+                'not authorized',
+                'insufficient privileges'
+            )
+
+            foreach ($pattern in $nonTransientPatterns) {
+                if ($msg -match $pattern) {
+                    Write-Log "EXO non-transient error (no retry): $msg" "ERROR"
+                    throw
+                }
+            }
             
             if ($i -ge $MaxRetries) { 
                 Write-Log "EXO operation failed after $MaxRetries attempts: $msg" "ERROR" 
                 throw 
             } 
 
-            $delay = $InitialDelaySeconds * [math]::Pow(2, ($i - 1))
+            $delay = [int]($InitialDelaySeconds * [math]::Pow(2, ($i - 1)))
 
             Write-Log "EXO transient error (attempt $i/$MaxRetries): $msg — retrying in $delay seconds" "WARN"
             Start-Sleep -Seconds $delay 
@@ -1636,14 +1885,42 @@ function Invoke-GraphBatch {
         requests = $Requests
     } | ConvertTo-Json -Depth 5
 
-    return Invoke-RestMethod `
-        -Method POST `
-        -Uri "https://graph.microsoft.com/v1.0/`$batch" `
-        -Headers @{
-            Authorization = "Bearer $AccessToken"
-            "Content-Type" = "application/json"
-        } `
-        -Body $body
+    try {
+        return Invoke-RestMethod `
+            -Method POST `
+            -Uri "https://graph.microsoft.com/v1.0/`$batch" `
+            -Headers @{
+                Authorization = "Bearer $AccessToken"
+                "Content-Type" = "application/json"
+            } `
+            -Body $body `
+            -ErrorAction Stop
+    }
+    catch {
+        $responseBody = $null
+        $exceptionMessage = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { ($_ | Out-String).Trim() }
+
+        if ($_.PSObject.Properties['ErrorDetails'] -and $null -ne $_.ErrorDetails) {
+            if ($_.ErrorDetails -is [string]) {
+                $responseBody = $_.ErrorDetails
+            }
+            elseif ($_.ErrorDetails.PSObject.Properties['Message']) {
+                $responseBody = $_.ErrorDetails.Message
+            }
+            else {
+                $responseBody = ($_.ErrorDetails | Out-String).Trim()
+            }
+        }
+
+        if (-not $responseBody) {
+            $responseBody = "<no response body available>"
+        }
+
+        Write-Log "GRAPH BATCH FAILED" "ERROR"
+        Write-Log "GRAPH BATCH ERROR: $exceptionMessage" "ERROR"
+        Write-Log "GRAPH BATCH RAW RESPONSE: $responseBody" "ERROR"
+        throw
+    }
 }
 
 function Invoke-BatchReconciliation {
@@ -2199,9 +2476,9 @@ try {
             if ($fullUser) {
                 $item = $fullUser
             }
-        } #>
+        } 
 
-    }
+    } #>
 
         # Debug (keep until confirmed working)
         $debugValue = $null
@@ -2385,9 +2662,9 @@ try {
                 if ($fullGroup) {
                     $group = $fullGroup
                 }
-            } #>
+            } 
 
-        }
+        }#>
 
         Write-Log "DEBUG PROXY: $($group.proxyAddresses)" "WARN"
 
