@@ -1308,7 +1308,7 @@ function Set-TargetMailContact {
     # ------------------------------------------------------
     # EMAIL-BASED ADOPTION (ONLY if no sync key match)
     # ------------------------------------------------------
-    if (-not $existing -and $SeedTargetFromSource -eq 'None') {
+    <#if (-not $existing -and $SeedTargetFromSource -eq 'None') {
 
         $emailMatches = $null
 
@@ -1318,6 +1318,20 @@ function Set-TargetMailContact {
 
         # if (-not $emailMatches) { $emailMatches = Find-TargetContactByEmail -Email $externalEmail }
         $emailMatches = @()
+
+        # Use indexed lookup if available
+        if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($externalEmail)) {
+
+            $emailMatches = $existingContactsByEmail[$externalEmail]
+        }
+        # FALLBACK for ON-DEMAND MODE
+        elseif (-not $existingContactsByEmail) {
+
+            Write-Log "Falling back to direct EXO lookup for adoption: $externalEmail" "DEBUG"
+
+            $emailMatches = Find-TargetContactByEmail -Email $externalEmail
+        }
+
 
         if ($emailMatches -and $emailMatches.Count -gt 0) {
 
@@ -1353,6 +1367,63 @@ function Set-TargetMailContact {
                         $existingContactsByEmail[$externalEmail] += $existing
                     }
                 }
+            }
+        }
+    } #>
+
+    # ======================================================
+    # ADOPTION (SYNC-KEY MISSING BUT SMTP MATCH EXISTS)
+    # ======================================================
+
+    if (-not $existing) {
+
+        $recipientConflict = Resolve-RecipientConflictByEmail -Email $externalEmail
+
+        if ($recipientConflict.ConflictFound) {
+
+            $recipient     = $recipientConflict.Recipient
+            $recipientType = $recipientConflict.RecipientType
+
+            # -------------------- MAILCONTACT → ADOPT --------------------
+            if ($recipientType -eq 'MailContact') {
+
+                Write-Log "Adopting existing MailContact (SMTP match): $externalEmail" "WARN"
+
+                $identity = $recipient.Identity
+
+                if ($SeedTargetFromSource -ne 'None') {
+                    Write-Log "Seed mode active — adoption skipped: $externalEmail" "WARN"
+                    return "Skipped"
+                }
+
+                if ($PSCmdlet.ShouldProcess($identity, "Adopt existing MailContact")) {
+
+                    Invoke-ExoWithRetry {
+                        Set-MailContact `
+                            -Identity $identity `
+                            -DisplayName $displayName `
+                            -ExternalEmailAddress $externalEmail `
+                            -CustomAttribute15 $syncKey
+                    }
+
+                    Write-Log "Adopted existing contact: $displayName <$externalEmail> [$syncKey]" "INFO"
+
+                    return "Updated"
+                }
+            }
+
+            # -------------------- MULTIPLE MATCHES --------------------
+            elseif ($recipientType -eq 'Multiple') {
+
+                Write-Log "Multiple recipient conflict — skipping adoption: $externalEmail" "WARN"
+                return "Skipped"
+            }
+
+            # -------------------- NON-CONTACT OBJECT --------------------
+            else {
+
+                Write-Log ("Cannot adopt — SMTP owned by {0}: {1}" -f $recipientType, $externalEmail) "WARN"
+                return "Skipped"
             }
         }
     }
@@ -1555,7 +1626,7 @@ function Set-TargetMailContactFromGroup {
     # ------------------------------------------------------
     # EMAIL-BASED ADOPTION (GROUPS)
     # ------------------------------------------------------
-    if (-not $existing -and $SeedTargetFromSource -eq 'None') {
+    <#if (-not $existing -and $SeedTargetFromSource -eq 'None') {
 
         $emailMatches = $null
 
@@ -1565,6 +1636,20 @@ function Set-TargetMailContactFromGroup {
 
         #if (-not $emailMatches) {$emailMatches = Find-TargetContactByEmail -Email $externalEmail }
         $emailMatches = @()
+
+        # Use indexed lookup if available
+        if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($externalEmail)) {
+
+            $emailMatches = $existingContactsByEmail[$externalEmail]
+        }
+        # FALLBACK for ON-DEMAND MODE
+        elseif (-not $existingContactsByEmail) {
+
+            Write-Log "Falling back to direct EXO lookup for adoption: $externalEmail" "DEBUG"
+
+            $emailMatches = Find-TargetContactByEmail -Email $externalEmail
+        }
+
 
         if ($emailMatches -and $emailMatches.Count -gt 0) {
 
@@ -1600,6 +1685,62 @@ function Set-TargetMailContactFromGroup {
                         $existingContactsByEmail[$externalEmail] += $existing
                     }
                 }
+            }
+        }
+    } #>
+    # ======================================================
+    # ADOPTION (SYNC-KEY MISSING BUT SMTP MATCH EXISTS)
+    # ======================================================
+
+    if (-not $existing) {
+
+        $recipientConflict = Resolve-RecipientConflictByEmail -Email $externalEmail
+
+        if ($recipientConflict.ConflictFound) {
+
+            $recipient     = $recipientConflict.Recipient
+            $recipientType = $recipientConflict.RecipientType
+
+            # -------------------- MAILCONTACT → ADOPT --------------------
+            if ($recipientType -eq 'MailContact') {
+
+                Write-Log "Adopting existing MailContact (SMTP match): $externalEmail" "WARN"
+
+                $identity = $recipient.Identity
+
+                if ($SeedTargetFromSource -ne 'None') {
+                    Write-Log "Seed mode active — adoption skipped: $externalEmail" "WARN"
+                    return "Skipped"
+                }
+
+                if ($PSCmdlet.ShouldProcess($identity, "Adopt existing MailContact")) {
+
+                    Invoke-ExoWithRetry {
+                        Set-MailContact `
+                            -Identity $identity `
+                            -DisplayName $displayName `
+                            -ExternalEmailAddress $externalEmail `
+                            -CustomAttribute15 $syncKey
+                    }
+
+                    Write-Log "Adopted existing contact: $displayName <$externalEmail> [$syncKey]" "INFO"
+
+                    return "Updated"
+                }
+            }
+
+            # -------------------- MULTIPLE MATCHES --------------------
+            elseif ($recipientType -eq 'Multiple') {
+
+                Write-Log "Multiple recipient conflict — skipping adoption: $externalEmail" "WARN"
+                return "Skipped"
+            }
+
+            # -------------------- NON-CONTACT OBJECT --------------------
+            else {
+
+                Write-Log ("Cannot adopt — SMTP owned by {0}: {1}" -f $recipientType, $externalEmail) "WARN"
+                return "Skipped"
             }
         }
     }
