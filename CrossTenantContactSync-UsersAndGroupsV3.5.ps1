@@ -995,7 +995,7 @@ function Get-NestedPropertyValue {
 
         if ($null -eq $current) { return $null }
 
-        # ✅ Handle Graph SDK objects explicitly
+        # Handle Graph SDK objects explicitly
         if ($current -isnot [psobject]) {
             try {
                 $current = $current.$segment
@@ -2923,10 +2923,54 @@ try {
         # ATTRIBUTE FILTER
         # =========================================================
 
-        $matchedGroupAttributeFilter = Test-AttributeFilterMatch `
+        <#$matchedGroupAttributeFilter = Test-AttributeFilterMatch `
             -InputObject $group `
             -AttributeFilters $config.AttributeFilters `
-            -ObjectType 'Group'
+            -ObjectType 'Group' #>
+
+            # =========================================================
+            # ATTRIBUTE FILTER (WITH FIRST-PASS GROUP HYDRATION)
+            # =========================================================
+
+            $needsAttr9 = $false
+
+            # Detect if any filter requires onPremisesExtensionAttributes
+            foreach ($f in $config.AttributeFilters) {
+                if ($f.ObjectType -in @('Group','Both') -and
+                    $f.PropertyPath -match '^onPremisesExtensionAttributes') {
+                    $needsAttr9 = $true
+                    break
+                }
+            }
+
+            # Check if attribute already present
+            $hasAttr = $false
+            if ($group.PSObject.Properties.Name -contains 'onPremisesExtensionAttributes') {
+                if ($group.onPremisesExtensionAttributes) {
+                    $hasAttr = $true
+                }
+            }
+
+            # Minimal hydration ONLY when needed
+            if ($needsAttr9 -and -not $hasAttr) {
+
+                Write-Log "Group filter attribute missing — fetching minimal attributes for $($group.id)" "DEBUG"
+
+                try {
+                    $group = Invoke-GraphJson `
+                        -Uri "https://graph.microsoft.com/v1.0/groups/$($group.id)?`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,proxyAddresses,onPremisesExtensionAttributes" `
+                        -AccessToken $graphToken
+                }
+                catch {
+                    Write-Log "Failed to hydrate group for filter check: $($_.Exception.Message)" "WARN"
+                }
+            }
+
+            # Evaluate filter AFTER hydration
+            $matchedGroupAttributeFilter = Test-AttributeFilterMatch `
+                -InputObject $group `
+                -AttributeFilters $config.AttributeFilters `
+                -ObjectType 'Group'
 
         if ($matchedGroupAttributeFilter) {
 
