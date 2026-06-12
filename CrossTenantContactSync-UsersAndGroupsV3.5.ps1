@@ -475,6 +475,25 @@ function Assert-Config {
     }
 }
 
+function Assert-AttributeFilterDesign {
+    param([Parameter(Mandatory)][object[]]$AttributeFilters)
+
+    foreach ($filter in @($AttributeFilters)) {
+
+        if (-not $filter) { continue }
+
+        $objectType = if ($filter.ObjectType) { [string]$filter.ObjectType } else { 'Both' }
+        $propertyPath = if ($filter.PropertyPath) { [string]$filter.PropertyPath } else { '' }
+
+        if ($objectType -in @('User','Both')) {
+
+            if ($propertyPath -notmatch '^onPremisesExtensionAttributes\.extensionAttribute([1-9]|1[0-5])$') {
+                throw "Invalid user AttributeFilter PropertyPath '$propertyPath'. User filters must use onPremisesExtensionAttributes.extensionAttributeX"
+            }
+        }
+    }
+}
+
 # -------------------- State --------------------
 
 function Get-StateFilePath {
@@ -1305,72 +1324,6 @@ function Set-TargetMailContact {
     # -------------------- HYBRID LOOKUP --------------------
     $existing = $ExistingContact
 
-    # ------------------------------------------------------
-    # EMAIL-BASED ADOPTION (ONLY if no sync key match)
-    # ------------------------------------------------------
-    <#if (-not $existing -and $SeedTargetFromSource -eq 'None') {
-
-        $emailMatches = $null
-
-        if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($externalEmail)) {
-            $emailMatches = $existingContactsByEmail[$externalEmail]
-        }
-
-        # if (-not $emailMatches) { $emailMatches = Find-TargetContactByEmail -Email $externalEmail }
-        $emailMatches = @()
-
-        # Use indexed lookup if available
-        if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($externalEmail)) {
-
-            $emailMatches = $existingContactsByEmail[$externalEmail]
-        }
-        # FALLBACK for ON-DEMAND MODE
-        elseif (-not $existingContactsByEmail) {
-
-            Write-Log "Falling back to direct EXO lookup for adoption: $externalEmail" "DEBUG"
-
-            $emailMatches = Find-TargetContactByEmail -Email $externalEmail
-        }
-
-
-        if ($emailMatches -and $emailMatches.Count -gt 0) {
-
-            if ($emailMatches.Count -gt 1) {
-                Write-Log "Multiple contacts match email $externalEmail — skipping adoption for safety" "WARN"
-                return "Skipped"
-            }
-
-            $existing = $emailMatches | Select-Object -First 1
-
-            Write-Log "Adopting existing contact via email match: $externalEmail" "WARN"
-
-            if ($PSCmdlet.ShouldProcess($existing.Identity, "Adopt existing contact via email match")) {
-                Invoke-ExoWithRetry {
-                    Set-MailContact -Identity $existing.Identity -CustomAttribute15 $syncKey
-                }
-
-                try {
-                    $existing.CustomAttribute15 = $syncKey
-                }
-                catch { }
-
-                if ($ExistingContacts) {
-                    $ExistingContacts[$syncKey] = $existing
-                }
-
-                if ($existingContactsByEmail) {
-                    if (-not $existingContactsByEmail.ContainsKey($externalEmail)) {
-                        $existingContactsByEmail[$externalEmail] = @()
-                    }
-
-                    if (-not ($existingContactsByEmail[$externalEmail] | Where-Object { $_.Identity -eq $existing.Identity })) {
-                        $existingContactsByEmail[$externalEmail] += $existing
-                    }
-                }
-            }
-        }
-    } #>
-
     # ======================================================
     # ADOPTION (SYNC-KEY MISSING BUT SMTP MATCH EXISTS)
     # ======================================================
@@ -1427,36 +1380,6 @@ function Set-TargetMailContact {
             }
         }
     }
-
-    # ======================================================
-    # ATTRIBUTE FILTER (RUN FIRST)
-    # ======================================================
-
-    <#$matchedUserAttributeFilter = Test-AttributeFilterMatch `
-        -InputObject $User `
-        -AttributeFilters $Config.AttributeFilters `
-        -ObjectType 'User'
-
-    if ($matchedUserAttributeFilter) {
-
-        Write-Log "FILTER MATCHED: extensionAttribute filter hit for user $($User.userPrincipalName)" "WARN"
-
-        if ($existing) {
-
-            Write-Log "Deleting contact due to AttributeFilter: $syncKey" "WARN"
-
-            Remove-TargetMailContactBySyncKey `
-                -SyncKey $syncKey `
-                -ExistingContacts $ExistingContacts `
-                -DisableDeletes:$Config.DisableDeletes
-
-            return "Deleted"
-        }
-        else {
-            Write-Log "Filter matched but no existing contact found: $syncKey" "DEBUG"
-            return "Skipped"
-        }
-    } #>
 
     # ======================================================
     # NORMAL PROCESSING (ONLY IF NOT FILTERED)
@@ -1623,71 +1546,6 @@ function Set-TargetMailContactFromGroup {
     # -------------------- HYBRID LOOKUP --------------------
     $existing = $ExistingContact
 
-    # ------------------------------------------------------
-    # EMAIL-BASED ADOPTION (GROUPS)
-    # ------------------------------------------------------
-    <#if (-not $existing -and $SeedTargetFromSource -eq 'None') {
-
-        $emailMatches = $null
-
-        if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($externalEmail)) {
-            $emailMatches = $existingContactsByEmail[$externalEmail]
-        }
-
-        #if (-not $emailMatches) {$emailMatches = Find-TargetContactByEmail -Email $externalEmail }
-        $emailMatches = @()
-
-        # Use indexed lookup if available
-        if ($existingContactsByEmail -and $existingContactsByEmail.ContainsKey($externalEmail)) {
-
-            $emailMatches = $existingContactsByEmail[$externalEmail]
-        }
-        # FALLBACK for ON-DEMAND MODE
-        elseif (-not $existingContactsByEmail) {
-
-            Write-Log "Falling back to direct EXO lookup for adoption: $externalEmail" "DEBUG"
-
-            $emailMatches = Find-TargetContactByEmail -Email $externalEmail
-        }
-
-
-        if ($emailMatches -and $emailMatches.Count -gt 0) {
-
-            if ($emailMatches.Count -gt 1) {
-                Write-Log "Multiple group contacts match email $externalEmail — skipping adoption for safety" "WARN"
-                return "Skipped"
-            }
-
-            $existing = $emailMatches | Select-Object -First 1
-
-            Write-Log "Adopting existing GROUP contact via email match: $externalEmail" "WARN"
-
-            if ($PSCmdlet.ShouldProcess($existing.Identity, "Adopt existing group contact via email match")) {
-                Invoke-ExoWithRetry {
-                    Set-MailContact -Identity $existing.Identity -CustomAttribute15 $syncKey
-                }
-
-                try {
-                    $existing.CustomAttribute15 = $syncKey
-                }
-                catch { }
-
-                if ($ExistingContacts) {
-                    $ExistingContacts[$syncKey] = $existing
-                }
-
-                if ($existingContactsByEmail) {
-                    if (-not $existingContactsByEmail.ContainsKey($externalEmail)) {
-                        $existingContactsByEmail[$externalEmail] = @()
-                    }
-
-                    if (-not ($existingContactsByEmail[$externalEmail] | Where-Object { $_.Identity -eq $existing.Identity })) {
-                        $existingContactsByEmail[$externalEmail] += $existing
-                    }
-                }
-            }
-        }
-    } #>
     # ======================================================
     # ADOPTION (SYNC-KEY MISSING BUT SMTP MATCH EXISTS)
     # ======================================================
@@ -1746,36 +1604,6 @@ function Set-TargetMailContactFromGroup {
     }
 
     # ======================================================
-    # ATTRIBUTE FILTER (RUN FIRST - CRITICAL)
-    # ======================================================
-
-   <# $matchedGroupAttributeFilter = Test-AttributeFilterMatch `
-        -InputObject $Group `
-        -AttributeFilters $Config.AttributeFilters `
-        -ObjectType 'Group'
-
-    if ($matchedGroupAttributeFilter) {
-
-        Write-Log "FILTER MATCHED (GROUP): AttributeFilter hit for $($Group.displayName)" "WARN"
-
-        if ($existing) {
-
-            Write-Log "Deleting group contact due to AttributeFilter: $syncKey" "WARN"
-
-            Remove-TargetMailContactBySyncKey `
-                -SyncKey $syncKey `
-                -ExistingContacts $ExistingContacts `
-                -DisableDeletes:$Config.DisableDeletes
-
-            return "Deleted"
-        }
-        else {
-            Write-Log "Filter matched but no existing group contact found: $syncKey" "DEBUG"
-            return "Skipped"
-        }
-    } #>
-
-    # ======================================================
     # UPDATE EXISTING
     # ======================================================
 
@@ -1823,10 +1651,6 @@ function Set-TargetMailContactFromGroup {
             return "Updated"
         }
     }
-
-    # ======================================================
-    # CREATE NEW
-    # ======================================================
 
     # ======================================================
     # CREATE NEW (WITH CONFLICT HANDLING)
@@ -2219,11 +2043,30 @@ function Invoke-BatchReconciliation {
                 $reqId    = "$counter"
 
                 # Type-based endpoint routing
+
                 if ($type -eq 'User') {
-                    $url = "/users/$($objectId)?`$select=id,userPrincipalName,onPremisesExtensionAttributes"
+
+                    # USER filtering is constrained to onPremisesExtensionAttributes only
+                    $url = "/users/$($objectId)?`$select=id,userPrincipalName,displayName,onPremisesExtensionAttributes"
                 }
                 elseif ($type -eq 'Group') {
-                    $url = "/groups/$($objectId)?`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,proxyAddresses,onPremisesExtensionAttributes"
+
+                    # GROUP filtering remains fully dynamic based on XML
+                    $extraProps = Get-TopLevelSelectPropertiesFromAttributeFilters `
+                        -AttributeFilters $Config.AttributeFilters `
+                        -ObjectType 'Group'
+
+                    $selectProps = @(
+                        'id',
+                        'displayName',
+                        'mail',
+                        'mailEnabled',
+                        'securityEnabled',
+                        'groupTypes',
+                        'proxyAddresses'
+                    ) + $extraProps | Select-Object -Unique
+
+                    $url = "/groups/$($objectId)?`$select=$($selectProps -join ',')"
                 }
 
                 $requests += @{
@@ -2250,22 +2093,55 @@ function Invoke-BatchReconciliation {
                 $body    = $res.body
                 $syncKey = $idMap[$res.id]
 
-                # Safe attribute extraction
-                $attrValue = $null
-                if ($body.PSObject.Properties.Name -contains 'onPremisesExtensionAttributes') {
-                    if ($body.onPremisesExtensionAttributes) {
-                        $attrValue = $body.onPremisesExtensionAttributes.extensionAttribute9
+            if ($type -eq 'User') {
+
+                $name = $body.userPrincipalName
+
+                foreach ($filter in @($Config.AttributeFilters)) {
+
+                    if (-not $filter) { continue }
+
+                    $filterObjectType = if ($filter.ObjectType) { [string]$filter.ObjectType } else { 'Both' }
+
+                    if ($filterObjectType -notin @('User','Both')) {
+                        continue
                     }
-                }
 
-                if ($type -eq 'User') {
-                    $name = $body.userPrincipalName
-                }
-                else {
-                    $name = $body.displayName
-                }
+                    $propertyPath = [string]$filter.PropertyPath
+                    if (-not $propertyPath) { continue }
 
-                Write-Log "RECON DEBUG ($type): $name Attr9='$attrValue'" "DEBUG"
+                    $value = Get-NestedPropertyValue `
+                        -InputObject $body `
+                        -PropertyPath $propertyPath
+
+                    Write-Log "RECON DEBUG (User): $name Property='$propertyPath' Value='$value'" "DEBUG"
+                }
+            }
+            else {
+
+                $name = $body.displayName
+
+                foreach ($filter in @($Config.AttributeFilters)) {
+
+                    if (-not $filter) { continue }
+
+                    $filterObjectType = if ($filter.ObjectType) { [string]$filter.ObjectType } else { 'Both' }
+
+                    if ($filterObjectType -notin @('Group','Both')) {
+                        continue
+                    }
+
+                    $propertyPath = [string]$filter.PropertyPath
+                    if (-not $propertyPath) { continue }
+
+                    $value = Get-NestedPropertyValue `
+                        -InputObject $body `
+                        -PropertyPath $propertyPath
+
+                    Write-Log "RECON DEBUG (Group): $name Property='$propertyPath' Value='$value'" "DEBUG"
+                }
+            }
+
 
                 # Reuse same filter logic
                 $match = Test-AttributeFilterMatch `
@@ -2337,6 +2213,8 @@ $config.TopUsers = [int]$config.TopUsers
 
 Assert-Config -Config $config
 
+Assert-AttributeFilterDesign -AttributeFilters $config.AttributeFilters
+
 Ensure-Folder -Path $config.StateRoot
 Ensure-Folder -Path $config.LogRoot
 
@@ -2382,12 +2260,6 @@ if ($config.AttributeFilters -and $config.AttributeFilters.Count -gt 0) {
 else {
     Write-Log "No AttributeFilters defined in config." "INFO"
 }
-
-
-
-# ---------------------------------------------------------
-# Initialize reconciliation counter if missing
-# ---------------------------------------------------------
 
 # ---------------------------------------------------------
 # Time-based reconciliation trigger
@@ -2566,6 +2438,8 @@ try {
         Write-Log "Using ON-DEMAND lookup mode (changes: $TotalChangeCount)" "INFO"
     }
     
+    #STOP
+
     Connect-TargetExchange -Config $config
     Write-Log "Connected to Exchange Online target tenant."
 
@@ -2697,39 +2571,26 @@ try {
         # FIX: SAFE PROPERTY CHECK + HYDRATION
         # =========================================================
 
-<#
-        $hasExtensionAttributes = $false
+        # Generic USER filter debug driven by XML (restricted to onPremisesExtensionAttributes by validation)
+        foreach ($filter in @($config.AttributeFilters)) {
 
-        if ($item.PSObject.Properties.Name -contains 'onPremisesExtensionAttributes') {
-            $hasExtensionAttributes = $true
-        }
+            if (-not $filter) { continue }
 
-        if (-not $IsFirstRun) {
+            $filterObjectType = if ($filter.ObjectType) { [string]$filter.ObjectType } else { 'Both' }
 
-        if (-not $hasExtensionAttributes -or -not $item.onPremisesExtensionAttributes) {
-
-            Write-Log "User attribute missing in delta payload — fetching full user: $($item.id)" "DEBUG"
-
-            $fullUser = Invoke-GraphJson `
-                -Uri "https://graph.microsoft.com/v1.0/users/$($item.id)?`$select=id,displayName,userPrincipalName,onPremisesExtensionAttributes" `
-                -AccessToken $graphToken
-
-            if ($fullUser) {
-                $item = $fullUser
+            if ($filterObjectType -notin @('User','Both')) {
+                continue
             }
-        } 
 
-    } #>
+            $propertyPath = [string]$filter.PropertyPath
+            if (-not $propertyPath) { continue }
 
-        # Debug (keep until confirmed working)
-        $debugValue = $null
-        if ($item.PSObject.Properties.Name -contains 'onPremisesExtensionAttributes') {
-            if ($item.onPremisesExtensionAttributes) {
-                $debugValue = $item.onPremisesExtensionAttributes.extensionAttribute9
-            }
+            $value = Get-NestedPropertyValue `
+                -InputObject $item `
+                -PropertyPath $propertyPath
+
+            Write-Log "DEBUG USER FILTER: Property='$propertyPath' Value='$value'" "DEBUG"
         }
-
-        Write-Log "DEBUG DIRECT ATTR: $debugValue" "DEBUG"
 
         # =========================================================
         # ATTRIBUTE FILTER
@@ -2742,7 +2603,7 @@ try {
 
         if ($matchedUserAttributeFilter) {
 
-            Write-Log "FILTER MATCHED: extensionAttribute9=DoNotSync for $upn" "WARN"
+            Write-Log "FILTER MATCHED: user excluded by AttributeFilters for $upn" "WARN"
 
             if ($existing -and $SeedTargetFromSource -eq 'None') {
 
@@ -2880,97 +2741,74 @@ try {
             continue
         }
 
-        # =========================================================
-        # FIX: SAFE PROPERTY CHECK + HYDRATION
-        # =========================================================
-<#
-        $hasExtensionAttributes = $false
-
-        if ($group.PSObject.Properties.Name -contains 'onPremisesExtensionAttributes') {
-            $hasExtensionAttributes = $true
-        }
-
-        if (-not $IsFirstRun) {
-
-            if (-not $hasExtensionAttributes -or -not $group.onPremisesExtensionAttributes) {
-
-                Write-Log "Group attribute missing in delta payload — fetching full group: $($group.id)" "DEBUG"
-
-                $fullGroup = Invoke-GraphJson `
-                    -Uri "https://graph.microsoft.com/v1.0/groups/$($group.id)?`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,proxyAddresses,onPremisesExtensionAttributes" `
-                    -AccessToken $graphToken
-
-                if ($fullGroup) {
-                    $group = $fullGroup
-                }
-            } 
-
-        }#>
-
         Write-Log "DEBUG PROXY: $($group.proxyAddresses)" "WARN"
 
-        # Debug (keep until validated)
-        $debugValue = $null
-        if ($group.PSObject.Properties.Name -contains 'onPremisesExtensionAttributes') {
-            if ($group.onPremisesExtensionAttributes) {
-                $debugValue = $group.onPremisesExtensionAttributes.extensionAttribute9
+        # Generic GROUP-ONLY filter debug driven by XML
+        foreach ($filter in @($config.AttributeFilters)) {
+
+            if (-not $filter) { continue }
+
+            $filterObjectType = if ($filter.ObjectType) { [string]$filter.ObjectType } else { 'Both' }
+
+            # STRICTLY GROUP-ONLY
+            if ($filterObjectType -notin @('Group','Both')) {
+                continue
+            }
+
+            $propertyPath = [string]$filter.PropertyPath
+            if (-not $propertyPath) { continue }
+
+            $value = Get-NestedPropertyValue `
+                -InputObject $group `
+                -PropertyPath $propertyPath
+
+            Write-Log "DEBUG GROUP FILTER: Property='$propertyPath' Value='$value'" "DEBUG"
+        }
+
+        # =========================================================
+        # ATTRIBUTE FILTER (WITH GENERIC GROUP HYDRATION)
+        # =========================================================
+
+        $requiredGroupFilterProps = Get-TopLevelSelectPropertiesFromAttributeFilters `
+            -AttributeFilters $config.AttributeFilters `
+            -ObjectType 'Group'
+
+        $missingGroupFilterProps = @(
+            $requiredGroupFilterProps | Where-Object {
+                $group.PSObject.Properties.Name -notcontains $_
+            }
+        )
+
+        if ($missingGroupFilterProps.Count -gt 0) {
+
+            Write-Log "Group filter properties missing from delta payload for $($group.id): $($missingGroupFilterProps -join ', ')" "DEBUG"
+
+            $groupSelectProps = @(
+                'id',
+                'displayName',
+                'mail',
+                'mailEnabled',
+                'securityEnabled',
+                'groupTypes',
+                'proxyAddresses'
+            ) + $requiredGroupFilterProps | Select-Object -Unique
+
+            $groupSelect = ($groupSelectProps -join ',')
+
+            try {
+                $group = Invoke-GraphJson `
+                    -Uri "https://graph.microsoft.com/v1.0/groups/$($group.id)?`$select=$groupSelect" `
+                    -AccessToken $graphToken
+            }
+            catch {
+                Write-Log "Failed to hydrate group for filter check: $($_.Exception.Message)" "WARN"
             }
         }
 
-        Write-Log "DEBUG DIRECT GROUP ATTR: $debugValue" "DEBUG"
-
-        # =========================================================
-        # ATTRIBUTE FILTER
-        # =========================================================
-
-        <#$matchedGroupAttributeFilter = Test-AttributeFilterMatch `
+        $matchedGroupAttributeFilter = Test-AttributeFilterMatch `
             -InputObject $group `
             -AttributeFilters $config.AttributeFilters `
-            -ObjectType 'Group' #>
-
-            # =========================================================
-            # ATTRIBUTE FILTER (WITH FIRST-PASS GROUP HYDRATION)
-            # =========================================================
-
-            $needsAttr9 = $false
-
-            # Detect if any filter requires onPremisesExtensionAttributes
-            foreach ($f in $config.AttributeFilters) {
-                if ($f.ObjectType -in @('Group','Both') -and
-                    $f.PropertyPath -match '^onPremisesExtensionAttributes') {
-                    $needsAttr9 = $true
-                    break
-                }
-            }
-
-            # Check if attribute already present
-            $hasAttr = $false
-            if ($group.PSObject.Properties.Name -contains 'onPremisesExtensionAttributes') {
-                if ($group.onPremisesExtensionAttributes) {
-                    $hasAttr = $true
-                }
-            }
-
-            # Minimal hydration ONLY when needed
-            if ($needsAttr9 -and -not $hasAttr) {
-
-                Write-Log "Group filter attribute missing — fetching minimal attributes for $($group.id)" "DEBUG"
-
-                try {
-                    $group = Invoke-GraphJson `
-                        -Uri "https://graph.microsoft.com/v1.0/groups/$($group.id)?`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,proxyAddresses,onPremisesExtensionAttributes" `
-                        -AccessToken $graphToken
-                }
-                catch {
-                    Write-Log "Failed to hydrate group for filter check: $($_.Exception.Message)" "WARN"
-                }
-            }
-
-            # Evaluate filter AFTER hydration
-            $matchedGroupAttributeFilter = Test-AttributeFilterMatch `
-                -InputObject $group `
-                -AttributeFilters $config.AttributeFilters `
-                -ObjectType 'Group'
+            -ObjectType 'Group'
 
         if ($matchedGroupAttributeFilter) {
 

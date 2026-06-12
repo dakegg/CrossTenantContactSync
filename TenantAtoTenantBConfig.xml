@@ -1,36 +1,37 @@
 <Configuration>
   <Source>
-    <TenantId>11111111-1111-1111-1111-111111111111</TenantId>
-    <TenantName>TenantA</TenantName>
-    <ClientId>22222222-2222-2222-2222-222222222222</ClientId>
-    <ClientSecret>YOUR_SOURCE_GRAPH_CLIENT_SECRET</ClientSecret>
+    <TenantId>xxxxxxxxxxxxxxxxxxxxxxxxxxxxx</TenantId>
+    <TenantName>Friendly Name for Source Tenant (this will be added to DisplayName on Target)</TenantName>
+    <ClientId>yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</ClientId>
+    <ClientSecret>zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz</ClientSecret>
   </Source>
 
   <Target>
-    <Organization>hubtenant.onmicrosoft.com</Organization>
-    <TenantId>33333333-3333-3333-3333-333333333333</TenantId>
-    <TenantName>HubTenant</TenantName>
-    <ExoAppId>44444444-4444-4444-4444-444444444444</ExoAppId>
-    <ExoCertThumbprint>ABCDEF1234567890ABCDEF1234567890ABCDEF12</ExoCertThumbprint>
+    <Organization>contoso.onmicrosoft.com</Organization>
+    <TenantId>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</TenantId>
+    <TenantName>contoso.onmicrosoft.com</TenantName>
+    <ExoAppId>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</ExoAppId>
+    <ExoCertThumbprint>cccccccccccccccccccccccccccccccccc</ExoCertThumbprint>
   </Target>
 
   <Runtime>
-    <StateRoot>C:\TenantContactSync\State</StateRoot>
-    <LogRoot>C:\TenantContactSync\Logs</LogRoot>
+    <StateRoot>C:\Temp\TenantContactSync\State</StateRoot>
+    <LogRoot>C:\Temp\TenantContactSync\Logs</LogRoot>
     <AppendSourceTenantToDisplayName>true</AppendSourceTenantToDisplayName>
     <AllowUpnFallback>true</AllowUpnFallback>
     <DisableDeletes>false</DisableDeletes>
     <SourceObjectType>User</SourceObjectType>
     <TopUsers>0</TopUsers>
+    <SeedTargetFromSource></SeedTargetFromSource>
   </Runtime>
 
 <Filters>
   <IncludeDomains>
-    <Domain>contoso.com</Domain>
+    <Domain></Domain>
   </IncludeDomains>
 
   <ExcludeDomains>
-    <Domain>gmail.com</Domain>
+    <Domain></Domain>
   </ExcludeDomains>
 
   <ServiceAccountPatterns>
@@ -41,5 +42,23 @@
     <Pattern>^service</Pattern>
     <Pattern>azureadconnect</Pattern>
   </ServiceAccountPatterns>
+
+  <AttributeFilters>
+  <Filter>
+    <ObjectType>User</ObjectType>
+    <PropertyPath>onPremisesExtensionAttributes.extensionAttribute9</PropertyPath>
+    <Operator>Equals</Operator>
+    <Value>DoNotSync</Value>
+  </Filter>
+
+  <Filter>
+    <ObjectType>Group</ObjectType>
+    <PropertyPath>extension_5c9a0521674b41b69a7d81ffb3a43dc5_CreateAsContact</PropertyPath>
+    <Operator>Equals</Operator>
+    <Value>False</Value>
+  </Filter>
+</AttributeFilters>
+
 </Filters>
+
 </Configuration>
