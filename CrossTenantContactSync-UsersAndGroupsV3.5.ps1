@@ -252,7 +252,7 @@ param(
     #scoping
     [int]$TopUsers = 0,
     [int]$LogLevel = 3,
-    [int]$ReconciliationIntervalHours = 8,
+    [int]$ReconciliationIntervalHours = 24,
     [switch]$ForceReconciliation,
     [int]$MaxUserResults  = 0,
     [int]$MaxGroupResults = 0,
@@ -271,9 +271,27 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# -------------------- Runtime tracking --------------------
+$script:RunStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$script:RunStartTime = Get-Date
+
 # $ForceReconciliation = $true #for testing
 
 # -------------------- Utility / logging --------------------
+
+function Format-ElapsedTime {
+    param(
+        [Parameter(Mandatory)]
+        [TimeSpan]$Elapsed
+    )
+
+    if ($Elapsed.TotalHours -ge 1) {
+        return "{0:00}:{1:00}:{2:00}" -f [int]$Elapsed.TotalHours, $Elapsed.Minutes, $Elapsed.Seconds
+    }
+
+    return "{0:00}:{1:00}" -f $Elapsed.Minutes, $Elapsed.Seconds
+}
+
 
 function Ensure-Folder {
     param([Parameter(Mandatory)][string]$Path)
@@ -2173,6 +2191,8 @@ function Invoke-BatchReconciliation {
 
 # -------------------- Main --------------------
 
+$servicePatterns = @()
+
 $paramConfig = [pscustomobject]@{
     SourceTenantId                  = $SourceTenantId
     SourceTenantName                = $SourceTenantName
@@ -2232,7 +2252,7 @@ if ($IsFirstRun) {
 
 Write-Log "Loaded LastReconciliationUtc: $($state.LastReconciliationUtc)" "DEBUG"
 
-$servicePatterns = @()
+#$servicePatterns = @()
 
 if ($config.ServiceAccountPatterns -and $config.ServiceAccountPatterns.Count -gt 0) {
     $servicePatterns = $config.ServiceAccountPatterns
@@ -2941,18 +2961,41 @@ try {
     }
 
 
+    $script:RunStopwatch.Stop()
+
+    $elapsed = $script:RunStopwatch.Elapsed
+    $elapsedFormatted = Format-ElapsedTime -Elapsed $elapsed
+
     Write-Log "Sync complete."
+
     $totalProcessed = $ProcessedCount + $deleted + $skipped
-    Write-Log "Summary:" 
-    Write-Log " Created/Updated : $createdOrUpdated" 
-    Write-Log " Deleted : $deleted" 
-    Write-Log " Skipped : $skipped" 
-    Write-Log " TotalProcessed : $totalProcessed"
+
+    Write-Log "Summary:"
+    Write-Log " Created/Updated : $createdOrUpdated"
+    Write-Log " Deleted         : $deleted"
+    Write-Log " Skipped         : $skipped"
+    Write-Log " TotalProcessed  : $totalProcessed"
+    Write-Log " Runtime         : $elapsedFormatted"
+    Write-Log (" RuntimeSeconds  : {0:N2}" -f $elapsed.TotalSeconds)
+    Write-Log (" Started         : {0}" -f $script:RunStartTime.ToString("yyyy-MM-dd HH:mm:ss"))
+    Write-Log (" Finished        : {0}" -f (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))
+
+
 }
 catch {
+    if ($script:RunStopwatch -and $script:RunStopwatch.IsRunning) {
+        $script:RunStopwatch.Stop()
+    }
+
+    if ($script:RunStopwatch) {
+        $elapsedFormatted = Format-ElapsedTime -Elapsed $script:RunStopwatch.Elapsed
+        Write-Log "Runtime before failure: $elapsedFormatted" 'ERROR'
+    }
+
     Write-Log "Fatal error: $($_.Exception.Message)" 'ERROR'
     throw
 }
+
 finally {
     Disconnect-TargetExchangeSafe
 }
