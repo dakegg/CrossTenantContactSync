@@ -4,11 +4,11 @@
     [string]$ScheduleType = "DAILY",   # DAILY, MINUTE, HOURLY
     [string]$StartTime = "01:00",
     [int]$Interval = 30,
-    [string]$SourceFolder = "C:\Logs",
-    [string]$TargetFolder = "D:\Archive",
+    [string]$SourceFolder = "C:\temp\TenantContactSync\Logs",
+    [string]$TargetFolder = "C:\temp\TenantContactSync\Logs\Zips",
     [string]$Extension = "*.log",
     [int]$RetentionDays = 7,
-    [string]$LogPath = "C:\Logs\ArchiveJob.log"
+    [string]$LogPath = "C:\temp\TenantContactSync\Logs\Zips\ArchiveJob.log"
 )
 
 function Test-IsAdministrator {
@@ -97,7 +97,7 @@ try {
     Write-Host "Starting Archive Job at $(Get-Date)"
 
     # OPTIONAL: If functions are stored separately
-    # . "C:\Scripts\ArchiveFunctions.ps1"
+    . "C:\Users\dkegg\OneDrive - Microsoft\Documents\GitHub\CTCS\CrossTenantContactSync\ArchiveFunctions.ps1"
 
     $result = Invoke-LogArchivalJob `
         -SourceFolder $SourceFolder `

@@ -25,6 +25,7 @@
     if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
         try {
             $logFolder = Split-Path -Path $LogPath -Parent
+
             if (-not [string]::IsNullOrWhiteSpace($logFolder) -and -not (Test-Path -LiteralPath $logFolder)) {
                 New-Item -Path $logFolder -ItemType Directory -Force | Out-Null
             }
@@ -57,14 +58,17 @@ function Invoke-WithRetry {
     )
 
     $attempt = 0
+
     do {
         $attempt++
+
         try {
             Write-LogMessage -Level DEBUG -Message "$OperationName attempt $attempt of $RetryCount." -LogPath $LogPath
             return & $ScriptBlock
         }
         catch {
             $msg = "$OperationName failed on attempt $attempt of $RetryCount. $($_.Exception.Message)"
+
             if ($attempt -ge $RetryCount) {
                 Write-LogMessage -Level ERROR -Message $msg -LogPath $LogPath
                 throw
@@ -106,18 +110,15 @@ Function Zip-Yesterday {
 
     begin {
         try {
+            Add-Type -AssemblyName 'System.IO.Compression' -ErrorAction Stop
             Add-Type -AssemblyName 'System.IO.Compression.FileSystem' -ErrorAction Stop
         }
         catch {
-            throw "Failed to load System.IO.Compression.FileSystem. $($_.Exception.Message)"
+            throw "Failed to load ZIP compression assemblies. $($_.Exception.Message)"
         }
     }
 
     process {
-        $tempFolderName = $null
-        $zipCreated = $false
-        $files = @()
-
         try {
             Write-LogMessage -Level INFO -Message "Starting Zip-Yesterday. SourceFolder='$SourceFolder', TargetFolder='$TargetFolder', Extension='$Extension'." -LogPath $LogPath
 
@@ -129,10 +130,9 @@ Function Zip-Yesterday {
                 throw "TargetFolder does not exist or is not a folder: $TargetFolder"
             }
 
-            [datetime]$yesterdayStart = (Get-Date).Date.AddDays(-1)
-            [datetime]$todayStart     = (Get-Date).Date
+            [datetime]$todayStart = (Get-Date).Date
 
-            Write-LogMessage -Level DEBUG -Message "Selecting files with LastWriteTime >= '$yesterdayStart' and < '$todayStart'." -LogPath $LogPath
+            Write-LogMessage -Level DEBUG -Message "Selecting files with LastWriteTime earlier than '$todayStart'. Today's files will not be archived." -LogPath $LogPath
 
             $gciParams = @{
                 Path        = $SourceFolder
@@ -146,140 +146,238 @@ Function Zip-Yesterday {
             }
 
             $files = @(Get-ChildItem @gciParams | Where-Object {
-                $_.LastWriteTime -ge $yesterdayStart -and $_.LastWriteTime -lt $todayStart
+                $_.LastWriteTime -lt $todayStart
             })
 
             if (-not $files -or $files.Count -eq 0) {
-                Write-LogMessage -Level INFO -Message "No files found in '$SourceFolder' matching '$Extension' written yesterday." -LogPath $LogPath
+                Write-LogMessage -Level INFO -Message "No files found in '$SourceFolder' matching '$Extension' older than today." -LogPath $LogPath
 
-                [pscustomobject]@{
-                    FunctionName = 'Zip-Yesterday'
-                    SourceFolder = $SourceFolder
-                    TargetFolder = $TargetFolder
-                    Extension    = $Extension
-                    FileCount    = 0
-                    ZipPath      = $null
-                    Success      = $true
-                    Action       = 'NoFilesFound'
-                    StartRange   = $yesterdayStart
-                    EndRange     = $todayStart
+                return [pscustomobject]@{
+                    FunctionName    = 'Zip-Yesterday'
+                    SourceFolder    = $SourceFolder
+                    TargetFolder    = $TargetFolder
+                    Extension       = $Extension
+                    FileCount       = 0
+                    ZipPath         = $null
+                    ZipSizeBytes    = 0
+                    Success         = $true
+                    Action          = 'NoFilesFound'
+                    ArchivedDates   = @()
+                    SkippedDates    = @()
+                    SkippedFileCount = 0
+                    ArchiveResult   = @()
+                    SelectionCutoff = $todayStart
                 }
-                return
             }
 
             Write-LogMessage -Level INFO -Message "File(s) selected for ZIP: $($files.Count)" -LogPath $LogPath
             Write-LogMessage -Level DEBUG -Message ($files | Select-Object FullName, Length, LastWriteTime | Out-String -Width 200) -LogPath $LogPath
 
-            $tempFolderName = Join-Path -Path $env:TEMP -ChildPath ("Zip-Yesterday_{0}_{1}" -f (Get-Date -Format 'yyyyMMddHHmmssfff'), [guid]::NewGuid().ToString('N'))
-            $destination = Join-Path -Path $TargetFolder -ChildPath ("LogFiles-{0}.zip" -f $yesterdayStart.ToString('yyyyMMdd'))
+            $sourceRootItem = Get-Item -LiteralPath $SourceFolder -ErrorAction Stop
+            $sourceRoot = $sourceRootItem.FullName.TrimEnd('\')
 
-            Write-LogMessage -Level DEBUG -Message "Temp folder: $tempFolderName" -LogPath $LogPath
-            Write-LogMessage -Level DEBUG -Message "Destination ZIP: $destination" -LogPath $LogPath
+            $groups = @(
+                $files |
+                    Group-Object { $_.LastWriteTime.Date } |
+                    Sort-Object { [datetime]$_.Name }
+            )
 
-            if (Test-Path -LiteralPath $destination) {
-                Write-LogMessage -Level WARN -Message "ZIP '$destination' already exists. Assuming function already ran for this day. No action taken." -LogPath $LogPath
+            $archiveResults = New-Object System.Collections.Generic.List[object]
+            $skippedResults = New-Object System.Collections.Generic.List[object]
 
-                [pscustomobject]@{
-                    FunctionName = 'Zip-Yesterday'
-                    SourceFolder = $SourceFolder
-                    TargetFolder = $TargetFolder
-                    Extension    = $Extension
-                    FileCount    = $files.Count
-                    ZipPath      = $destination
-                    Success      = $true
-                    Action       = 'ZipAlreadyExists'
-                    StartRange   = $yesterdayStart
-                    EndRange     = $todayStart
+            $totalArchivedFiles = 0
+            $totalZipSizeBytes = 0
+            $totalSkippedFiles = 0
+
+            foreach ($group in $groups) {
+                [datetime]$archiveDate = [datetime]$group.Name
+                $dateText = $archiveDate.ToString('yyyyMMdd')
+                $destination = Join-Path -Path $TargetFolder -ChildPath ("LogFiles-{0}.zip" -f $dateText)
+
+                if (Test-Path -LiteralPath $destination) {
+                    Write-LogMessage `
+                        -Level WARN `
+                        -Message ("ZIP '{0}' already exists for {1}. Skipping {2} log file(s)." -f `
+                            $destination,
+                            $archiveDate.ToString('yyyy-MM-dd'),
+                            $group.Group.Count) `
+                        -LogPath $LogPath
+
+                    $totalSkippedFiles += $group.Group.Count
+
+                    $skippedResults.Add([pscustomobject]@{
+                        Date         = $archiveDate
+                        ZipPath      = $destination
+                        FilesSkipped = $group.Group.Count
+                        Success      = $true
+                        Action       = 'ZipAlreadyExists'
+                    }) | Out-Null
+
+                    continue
                 }
-                return
-            }
 
-            if ($PSCmdlet.ShouldProcess($tempFolderName, 'Create temporary folder for ZIP staging')) {
-                New-Item -Path $tempFolderName -ItemType Directory -Force -ErrorAction Stop | Out-Null
-            }
+                Write-LogMessage -Level INFO -Message "Processing archive date '$($archiveDate.ToString('yyyy-MM-dd'))'. File count: $($group.Group.Count). Destination ZIP: '$destination'." -LogPath $LogPath
 
-            Write-LogMessage -Level INFO -Message "Copying files to temp folder before compression." -LogPath $LogPath
+                $zipArchive = $null
+                $filesArchivedForDate = 0
+                $filesDeletedForDate = 0
 
-            foreach ($file in $files) {
-                $destinationFile = Join-Path -Path $tempFolderName -ChildPath $file.Name
+                try {
+                    if ($PSCmdlet.ShouldProcess($destination, "Create ZIP archive for $dateText")) {
+                        $zipArchive = Invoke-WithRetry `
+                            -RetryCount $RetryCount `
+                            -RetryDelaySeconds $RetryDelaySeconds `
+                            -OperationName "Open ZIP '$destination'" `
+                            -LogPath $LogPath `
+                            -ScriptBlock ({
+                                [System.IO.Compression.ZipFile]::Open(
+                                    $destination,
+                                    [System.IO.Compression.ZipArchiveMode]::Update
+                                )
+                            }.GetNewClosure())
 
-                if ($PSCmdlet.ShouldProcess($file.FullName, "Copy to temp folder '$tempFolderName'")) {
-                    Invoke-WithRetry -RetryCount $RetryCount -RetryDelaySeconds $RetryDelaySeconds -OperationName "Copy '$($file.FullName)'" -LogPath $LogPath -ScriptBlock {
-                        Copy-Item -LiteralPath $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
+                        foreach ($file in $group.Group) {
+                            $entryName = $file.FullName
+
+                            if ($entryName.StartsWith($sourceRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                $entryName = $entryName.Substring($sourceRoot.Length).TrimStart('\')
+                            }
+                            else {
+                                $entryName = $file.Name
+                            }
+
+                            $entryName = $entryName -replace '\\', '/'
+
+                            Write-LogMessage -Level DEBUG -Message "Adding ZIP entry '$entryName' from '$($file.FullName)'." -LogPath $LogPath
+
+                            Invoke-WithRetry `
+                                -RetryCount $RetryCount `
+                                -RetryDelaySeconds $RetryDelaySeconds `
+                                -OperationName "Add '$($file.FullName)' to ZIP '$destination'" `
+                                -LogPath $LogPath `
+                                -ScriptBlock ({
+                                    $existingEntry = $zipArchive.GetEntry($entryName)
+
+                                    if ($null -ne $existingEntry) {
+                                        $existingEntry.Delete()
+                                    }
+
+                                    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                                        $zipArchive,
+                                        $file.FullName,
+                                        $entryName,
+                                        [System.IO.Compression.CompressionLevel]::Optimal
+                                    ) | Out-Null
+                                }.GetNewClosure())
+
+                            $filesArchivedForDate++
+                        }
                     }
                 }
-            }
-
-            if ($PSCmdlet.ShouldProcess($destination, 'Create ZIP archive from temp folder')) {
-                Invoke-WithRetry -RetryCount $RetryCount -RetryDelaySeconds $RetryDelaySeconds -OperationName "Create ZIP '$destination'" -LogPath $LogPath -ScriptBlock {
-                    if (Test-Path -LiteralPath $destination) {
-                        Remove-Item -LiteralPath $destination -Force -ErrorAction Stop
-                    }
-
-                    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-                        $tempFolderName,
-                        $destination,
-                        [System.IO.Compression.CompressionLevel]::Optimal,
-                        $false
-                    )
-                }
-            }
-
-            if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
-                throw "ZIP creation did not produce the expected file: $destination"
-            }
-
-            $zipItem = Get-Item -LiteralPath $destination -ErrorAction Stop
-            if ($zipItem.Length -le 0) {
-                throw "ZIP file exists but is empty: $destination"
-            }
-
-            $zipCreated = $true
-            Write-LogMessage -Level INFO -Message "ZIP created successfully: '$destination' ($($zipItem.Length) bytes)." -LogPath $LogPath
-
-            Write-LogMessage -Level INFO -Message "Removing original files after successful ZIP creation." -LogPath $LogPath
-
-            foreach ($file in $files) {
-                if ($PSCmdlet.ShouldProcess($file.FullName, 'Delete original file after successful ZIP verification')) {
-                    Invoke-WithRetry -RetryCount $RetryCount -RetryDelaySeconds $RetryDelaySeconds -OperationName "Delete original '$($file.FullName)'" -LogPath $LogPath -ScriptBlock {
-                        Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                finally {
+                    if ($null -ne $zipArchive) {
+                        $zipArchive.Dispose()
+                        $zipArchive = $null
                     }
                 }
+
+                if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+                    throw "ZIP creation did not produce the expected file: $destination"
+                }
+
+                $zipItem = Get-Item -LiteralPath $destination -ErrorAction Stop
+
+                if ($zipItem.Length -le 0) {
+                    throw "ZIP file exists but is empty: $destination"
+                }
+
+                Write-LogMessage -Level INFO -Message "ZIP verified successfully: '$destination' ($($zipItem.Length) bytes)." -LogPath $LogPath
+                Write-LogMessage -Level INFO -Message "Removing original files for archive date '$($archiveDate.ToString('yyyy-MM-dd'))' after successful ZIP verification." -LogPath $LogPath
+
+                foreach ($file in $group.Group) {
+                    if ($PSCmdlet.ShouldProcess($file.FullName, 'Delete original file after successful ZIP verification')) {
+                        Invoke-WithRetry `
+                            -RetryCount $RetryCount `
+                            -RetryDelaySeconds $RetryDelaySeconds `
+                            -OperationName "Delete original '$($file.FullName)'" `
+                            -LogPath $LogPath `
+                            -ScriptBlock ({
+                                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                            }.GetNewClosure())
+
+                        $filesDeletedForDate++
+                    }
+                }
+
+                $totalArchivedFiles += $filesArchivedForDate
+                $totalZipSizeBytes += $zipItem.Length
+
+                $archiveResults.Add([pscustomobject]@{
+                    Date          = $archiveDate
+                    ZipPath       = $destination
+                    ZipSizeBytes  = $zipItem.Length
+                    FilesArchived = $filesArchivedForDate
+                    FilesDeleted  = $filesDeletedForDate
+                    Success       = $true
+                    Action        = 'ZipCreated'
+                }) | Out-Null
             }
 
-            [pscustomobject]@{
-                FunctionName = 'Zip-Yesterday'
-                SourceFolder = $SourceFolder
-                TargetFolder = $TargetFolder
-                Extension    = $Extension
-                FileCount    = $files.Count
-                ZipPath      = $destination
-                ZipSizeBytes = $zipItem.Length
-                Success      = $true
-                Action       = 'ZipCreated'
-                StartRange   = $yesterdayStart
-                EndRange     = $todayStart
+            Write-LogMessage -Level INFO -Message "Zip-Yesterday completed. Archived $totalArchivedFiles file(s) across $($archiveResults.Count) ZIP file(s). Skipped $totalSkippedFiles file(s) because matching ZIP file(s) already existed." -LogPath $LogPath
+
+            $finalAction = if ($archiveResults.Count -gt 0 -and $skippedResults.Count -gt 0) {
+                'ZipCreatedOrSkipped'
             }
+            elseif ($archiveResults.Count -gt 0) {
+                'ZipCreated'
+            }
+            elseif ($skippedResults.Count -gt 0) {
+                'AllMatchingZipsAlreadyExist'
+            }
+            else {
+                'NoActionTaken'
+            }
+
+            #Write-Host "archiveResults count = $($archiveResults.Count)"
+            #Write-Host "skippedResults count = $($skippedResults.Count)"
+            #Write-Host "finalAction = $finalAction"
+
+            return [pscustomobject]@{
+                FunctionName     = 'Zip-Yesterday'
+                FileCount        = $totalArchivedFiles
+                ZipPath          = @()
+                ZipSizeBytes     = $totalZipSizeBytes
+                Success          = $true
+                Action           = $finalAction
+                SkippedFileCount = $totalSkippedFiles
+                SkippedDates     = @()
+            }
+
+            <#
+            return [pscustomobject]@{
+                FunctionName     = 'Zip-Yesterday'
+                SourceFolder     = $SourceFolder
+                TargetFolder     = $TargetFolder
+                Extension        = $Extension
+                FileCount        = $totalArchivedFiles
+                ZipPath          = @($archiveResults | ForEach-Object { $_.ZipPath })
+                ZipSizeBytes     = $totalZipSizeBytes
+                Success          = $true
+                Action           = $finalAction
+                ArchivedDates    = @($archiveResults | ForEach-Object { $_.Date })
+                SkippedDates     = @($skippedResults | ForEach-Object { $_.Date })
+                SkippedFileCount = $totalSkippedFiles
+                ArchiveResult    = @($archiveResults)
+                SkippedResult    = @($skippedResults)
+                SelectionCutoff  = $todayStart
+            } #>
         }
         catch {
             Write-LogMessage -Level ERROR -Message "Zip-Yesterday failed. $($_.Exception.Message)" -LogPath $LogPath
             throw
         }
-        finally {
-            if (-not [string]::IsNullOrWhiteSpace($tempFolderName) -and (Test-Path -LiteralPath $tempFolderName)) {
-                try {
-                    if ($PSCmdlet.ShouldProcess($tempFolderName, 'Remove temporary folder')) {
-                        Remove-Item -LiteralPath $tempFolderName -Force -Recurse -ErrorAction Stop
-                        Write-LogMessage -Level DEBUG -Message "Removed temp folder '$tempFolderName'." -LogPath $LogPath
-                    }
-                }
-                catch {
-                    Write-LogMessage -Level WARN -Message "Failed to remove temp folder '$tempFolderName'. $($_.Exception.Message)" -LogPath $LogPath
-                }
-            }
-        }
     }
-} # END ZIP YESTERDAY FUNCTION
+}
 
 Function Purge-OldZips {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
@@ -311,7 +409,8 @@ Function Purge-OldZips {
             }
 
             [datetime]$cutoffDate = (Get-Date).Date.AddDays(-$OlderThan)
-            Write-LogMessage -Level DEBUG -Message "Selecting ZIP files with LastWriteTime < '$cutoffDate'." -LogPath $LogPath
+
+            Write-LogMessage -Level DEBUG -Message "Selecting ZIP files with LastWriteTime older than '$cutoffDate'." -LogPath $LogPath
 
             $files = @(Get-ChildItem -Path $TargetFolder -Filter '*.zip' -File -ErrorAction Stop | Where-Object {
                 $_.LastWriteTime -lt $cutoffDate
@@ -320,7 +419,7 @@ Function Purge-OldZips {
             if (-not $files -or $files.Count -eq 0) {
                 Write-LogMessage -Level INFO -Message "No ZIP files found in '$TargetFolder' older than $OlderThan day(s)." -LogPath $LogPath
 
-                [pscustomobject]@{
+                return [pscustomobject]@{
                     FunctionName = 'Purge-OldZips'
                     TargetFolder = $TargetFolder
                     OlderThan    = $OlderThan
@@ -329,7 +428,6 @@ Function Purge-OldZips {
                     Action       = 'NoFilesFound'
                     CutoffDate   = $cutoffDate
                 }
-                return
             }
 
             Write-LogMessage -Level INFO -Message "ZIP file(s) selected for purge: $($files.Count)" -LogPath $LogPath
@@ -339,16 +437,21 @@ Function Purge-OldZips {
 
             foreach ($file in $files) {
                 if ($PSCmdlet.ShouldProcess($file.FullName, 'Delete old ZIP file')) {
-                    Invoke-WithRetry -RetryCount $RetryCount -RetryDelaySeconds $RetryDelaySeconds -OperationName "Delete ZIP '$($file.FullName)'" -LogPath $LogPath -ScriptBlock {
-                        Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
-                    }
+                    Invoke-WithRetry `
+                        -RetryCount $RetryCount `
+                        -RetryDelaySeconds $RetryDelaySeconds `
+                        -OperationName "Delete ZIP '$($file.FullName)'" `
+                        -LogPath $LogPath `
+                        -ScriptBlock ({
+                            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                        }.GetNewClosure())
 
                     $purgedCount++
                     Write-LogMessage -Level INFO -Message "Deleted ZIP file '$($file.FullName)'." -LogPath $LogPath
                 }
             }
 
-            [pscustomobject]@{
+            return [pscustomobject]@{
                 FunctionName = 'Purge-OldZips'
                 TargetFolder = $TargetFolder
                 OlderThan    = $OlderThan
@@ -363,7 +466,7 @@ Function Purge-OldZips {
             throw
         }
     }
-} # END PURGE OLD ZIPS FUNCTION
+}
 
 Function Invoke-LogArchivalJob {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
@@ -404,19 +507,17 @@ Function Invoke-LogArchivalJob {
     $purgeResult = $null
 
     try {
-
-        # --- STEP 1: ZIP YESTERDAY ---
-        if ($PSCmdlet.ShouldProcess("Zip-Yesterday", "Archive yesterday's logs")) {
-            Write-LogMessage -Level INFO -Message "Step 1: Running Zip-Yesterday" -LogPath $LogPath
+        if ($PSCmdlet.ShouldProcess("Zip-Yesterday", "Archive log files older than today")) {
+            Write-LogMessage -Level INFO -Message "Step 1: Running Zip-Yesterday to archive log files older than today" -LogPath $LogPath
 
             $zipParams = @{
-                SourceFolder         = $SourceFolder
-                TargetFolder         = $TargetFolder
-                Extension            = $Extension
-                RetryCount           = $RetryCount
-                RetryDelaySeconds    = $RetryDelaySeconds
-                LogPath              = $LogPath
-                ErrorAction          = 'Stop'
+                SourceFolder      = $SourceFolder
+                TargetFolder      = $TargetFolder
+                Extension         = $Extension
+                RetryCount        = $RetryCount
+                RetryDelaySeconds = $RetryDelaySeconds
+                LogPath           = $LogPath
+                ErrorAction       = 'Stop'
             }
 
             if ($Recurse.IsPresent) {
@@ -426,7 +527,6 @@ Function Invoke-LogArchivalJob {
             $zipResult = Zip-Yesterday @zipParams -Verbose:$VerbosePreference
         }
 
-        # --- STEP 2: PURGE OLD ZIPS ---
         if ($PSCmdlet.ShouldProcess("Purge-OldZips", "Clean up old archives")) {
             Write-LogMessage -Level INFO -Message "Step 2: Running Purge-OldZips" -LogPath $LogPath
 
@@ -445,26 +545,27 @@ Function Invoke-LogArchivalJob {
 
         Write-LogMessage -Level INFO -Message "===== Log Archival Job Completed Successfully in $duration second(s) =====" -LogPath $LogPath
 
-        # --- CONSOLIDATED OUTPUT ---
         return [pscustomobject]@{
-            JobName            = 'LogArchival'
-            StartTime          = $jobStart
-            EndTime            = $jobEnd
-            DurationSeconds    = $duration
+            JobName          = 'LogArchival'
+            StartTime        = $jobStart
+            EndTime          = $jobEnd
+            DurationSeconds  = $duration
 
-            SourceFolder       = $SourceFolder
-            TargetFolder       = $TargetFolder
-            Extension          = $Extension
-            RetentionDays      = $RetentionDays
+            SourceFolder     = $SourceFolder
+            TargetFolder     = $TargetFolder
+            Extension        = $Extension
+            RetentionDays    = $RetentionDays
 
-            ZipFileCount       = $zipResult.FileCount
-            ZipPath            = $zipResult.ZipPath
-            ZipAction          = $zipResult.Action
+            ZipFileCount     = $zipResult.FileCount
+            ZipPath          = $zipResult.ZipPath
+            ZipAction        = $zipResult.Action
+            SkippedFileCount = $zipResult.SkippedFileCount
+            SkippedDates     = $zipResult.SkippedDates
 
-            PurgedFileCount    = $purgeResult.PurgedCount
-            PurgeAction        = $purgeResult.Action
+            PurgedFileCount  = $purgeResult.PurgedCount
+            PurgeAction      = $purgeResult.Action
 
-            OverallSuccess     = $true
+            OverallSuccess   = $true
         }
     }
     catch {
@@ -474,25 +575,27 @@ Function Invoke-LogArchivalJob {
         Write-LogMessage -Level ERROR -Message "Log Archival Job FAILED. $($_.Exception.Message)" -LogPath $LogPath
 
         return [pscustomobject]@{
-            JobName            = 'LogArchival'
-            StartTime          = $jobStart
-            EndTime            = $jobEnd
-            DurationSeconds    = $duration
+            JobName          = 'LogArchival'
+            StartTime        = $jobStart
+            EndTime          = $jobEnd
+            DurationSeconds  = $duration
 
-            SourceFolder       = $SourceFolder
-            TargetFolder       = $TargetFolder
-            Extension          = $Extension
-            RetentionDays      = $RetentionDays
+            SourceFolder     = $SourceFolder
+            TargetFolder     = $TargetFolder
+            Extension        = $Extension
+            RetentionDays    = $RetentionDays
 
-            ZipFileCount       = if ($zipResult) { $zipResult.FileCount } else { $null }
-            ZipPath            = if ($zipResult) { $zipResult.ZipPath } else { $null }
-            ZipAction          = if ($zipResult) { $zipResult.Action } else { 'Failed' }
+            ZipFileCount     = if ($zipResult) { $zipResult.FileCount } else { $null }
+            ZipPath          = if ($zipResult) { $zipResult.ZipPath } else { $null }
+            ZipAction        = if ($zipResult) { $zipResult.Action } else { 'Failed' }
+            SkippedFileCount = if ($zipResult) { $zipResult.SkippedFileCount } else { $null }
+            SkippedDates     = if ($zipResult) { $zipResult.SkippedDates } else { $null }
 
-            PurgedFileCount    = if ($purgeResult) { $purgeResult.PurgedCount } else { $null }
-            PurgeAction        = if ($purgeResult) { $purgeResult.Action } else { 'NotExecuted' }
+            PurgedFileCount  = if ($purgeResult) { $purgeResult.PurgedCount } else { $null }
+            PurgeAction      = if ($purgeResult) { $purgeResult.Action } else { 'NotExecuted' }
 
-            OverallSuccess     = $false
-            Error              = $_.Exception.Message
+            OverallSuccess   = $false
+            Error            = $_.Exception.Message
         }
 
         throw
