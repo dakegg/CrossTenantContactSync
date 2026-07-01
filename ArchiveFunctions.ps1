@@ -380,7 +380,7 @@ Function Zip-Yesterday {
 }
 
 Function Purge-OldZips {
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     Param(
         [Parameter(Mandatory = $True, ValueFromPipeline = $true, Position = 0)]
         [ValidateNotNullOrEmpty()]
