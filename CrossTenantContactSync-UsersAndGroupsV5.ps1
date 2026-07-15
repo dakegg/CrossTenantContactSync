@@ -319,7 +319,7 @@ param(
     # added for group membership instead of user delta
     [ValidateSet('Delta','GroupMembership')]
     [string]$SourceUserScopeMode = 'GroupMembership',
-    [string]$SourceUserScopeGroupId = "e2bb86cc-3a15-461e-9760-75b0fd7fa632",
+    [string]$SourceUserScopeGroupId,
     [bool]$SourceUserScopeGroupTransitive = $true,
     
     # Source object type
