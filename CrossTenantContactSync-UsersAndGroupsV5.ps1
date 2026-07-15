@@ -2968,7 +2968,7 @@ try {
 
             $userChangeCount = @($userDeltaResult.Changes).Count
 
-            Write-Log "Source group scoped users returned: $($currentScopedUsers.Count)" "INFO"
+            Write-Log "Source group scoped users returned: $(@($currentScopedUsers).Count)" "INFO"
             Write-Log "Source group users newly added to scope: $($newScopedUserIds.Count)" "WARN"
             Write-Log "Source group users removed from previous scope: $($removedFromScopeIds.Count)" "WARN"
             Write-Log "User source changes generated: $userChangeCount" "INFO"
