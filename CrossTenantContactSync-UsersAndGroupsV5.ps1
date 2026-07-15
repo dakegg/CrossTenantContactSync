@@ -312,7 +312,7 @@ param(
     [switch]$ForceReconciliation,
     [int]$MaxUserResults  = 0,
     [int]$MaxGroupResults = 0,
-    [int]$DeleteSafetyThreshold = 25,
+    [int]$DeleteSafetyThreshold = 500,
     [int]$MaxDeltaDetailLogItems = 50,
     [bool]$RequireDeleteConfirmation = $true,
 
@@ -1453,7 +1453,7 @@ function Test-AttributeFilterMatch {
         $actual = Get-NestedPropertyValue -InputObject $InputObject -PropertyPath $propertyPath
 
         # Debug logging (keep this while validating)
-        Write-Log "DEBUG FILTER RAW: Property='$propertyPath' Actual='$actual' Expected='$expected'" "DEBUG"
+        Write-Log "User Filter Criteria: Property='$propertyPath' Actual='$actual' Expected='$expected'" "DEBUG"
 
         #if ($null -eq $actual) { continue }
         if ($null -eq $actual) {
@@ -3341,7 +3341,7 @@ try {
                 -InputObject $item `
                 -PropertyPath $propertyPath
 
-            Write-Log "DEBUG USER FILTER: Property='$propertyPath' Value='$value'" "DEBUG"
+            #Write-Log "DEBUG USER FILTER: Property='$propertyPath' Value='$value'" "DEBUG"
         }
 
         # =========================================================
