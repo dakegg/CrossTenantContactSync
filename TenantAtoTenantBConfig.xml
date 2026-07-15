@@ -23,6 +23,10 @@
     <SourceObjectType>User</SourceObjectType>
     <TopUsers>0</TopUsers>
     <SeedTargetFromSource></SeedTargetFromSource>
+    <SourceUserScopeMode>Delta</SourceUserScopeMode>
+    <!-- <SourceUserScopeMode>GroupMembership</SourceUserScopeMode> -->
+    <SourceUserScopeGroupId>00000000-0000-0000-0000-000000000000</SourceUserScopeGroupId>
+    <SourceUserScopeGroupTransitive>true</SourceUserScopeGroupTransitive>
   </Runtime>
 
 <Filters>
