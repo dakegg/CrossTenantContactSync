@@ -256,6 +256,9 @@ param(
     [switch]$ForceReconciliation,
     [int]$MaxUserResults  = 0,
     [int]$MaxGroupResults = 0,
+    [int]$DeleteSafetyThreshold = 25,
+    [int]$MaxDeltaDetailLogItems = 50,
+    [bool]$RequireDeleteConfirmation = $true,
 
     # Source object type
     [ValidateSet('User','Group','Both')]
@@ -407,7 +410,8 @@ function Get-ConfigFromXml {
 function Merge-Config {
     param(
         [Parameter(Mandatory)][object]$ParamConfig,
-        [Parameter()][object]$XmlConfig
+        [Parameter()][object]$XmlConfig,
+        [Parameter()][System.Collections.IDictionary]$BoundParameterNames
     )
 
     $merged = [ordered]@{}
@@ -418,7 +422,7 @@ function Merge-Config {
         'AppendSourceTenantToDisplayName','AllowUpnFallback','DisableDeletes','TopUsers','SourceObjectType'
     )
 
-foreach ($k in $allKeys) {
+    foreach ($k in $allKeys) {
 
     $paramValue = $ParamConfig.$k
     $xmlValue   = if ($null -ne $XmlConfig) { $XmlConfig.$k } else { $null }
@@ -442,19 +446,14 @@ foreach ($k in $allKeys) {
     # ---------- BOOLEANS (FIXED PRECEDENCE) ----------
     elseif ($paramValue -is [bool]) {
 
-        if ($PSBoundParameters.ContainsKey($k)) {
-            # explicitly passed parameter wins
-            $useValue = $paramValue
-        }
-        elseif ($null -ne $paramValue) {
-            # parameter default wins over XML (fixes your issue)
+        if ($BoundParameterNames -and $BoundParameterNames.ContainsKey($k)) {
             $useValue = $paramValue
         }
         elseif ($null -ne $xmlValue -and ($xmlValue.ToString().Trim()) -ne '') {
             $useValue = [System.Convert]::ToBoolean($xmlValue)
         }
         else {
-            $useValue = $false
+            $useValue = $paramValue
         }
     }
 
@@ -654,6 +653,203 @@ function Invoke-GraphJson {
     }
 }
 
+function Test-SourceGraphObjectExists {
+    param(
+        [Parameter(Mandatory)][string]$AccessToken,
+        [Parameter(Mandatory)][string]$ObjectId,
+        [ValidateSet('User','Group')][string]$ObjectType
+    )
+
+    if (-not $ObjectId) {
+        return $false
+    }
+
+    if ($ObjectType -eq 'User') {
+        $uri = "https://graph.microsoft.com/v1.0/users/${ObjectId}?`$select=id"
+    }
+    else {
+        $uri = "https://graph.microsoft.com/v1.0/groups/${ObjectId}?`$select=id"
+    }
+
+    $headers = @{
+        Authorization = "Bearer $AccessToken"
+    }
+
+    try {
+        $null = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
+        return $true
+    }
+    catch {
+        $statusCode = $null
+
+        if ($_.Exception -and $_.Exception.Response) {
+            try {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            catch {
+                $statusCode = $null
+            }
+        }
+
+        if ($statusCode -eq 404) {
+            return $false
+        }
+
+        Write-Log "Unable to confirm source $ObjectType existence for id=$ObjectId. Treating delete as unsafe. Error=$($_.Exception.Message)" "WARN"
+        return $true
+    }
+}
+
+function Get-GraphUserMailboxPurpose {
+    param(
+        [Parameter(Mandatory)][string]$AccessToken,
+        [Parameter(Mandatory)][string]$UserId
+    )
+
+    if (-not $UserId) {
+        return "Unknown"
+    }
+
+    $uri = "https://graph.microsoft.com/v1.0/users/$UserId/mailboxSettings/userPurpose"
+
+    try {
+        $result = Invoke-GraphJson -Uri $uri -AccessToken $AccessToken
+
+        $valueProp = $result.PSObject.Properties['value']
+
+        if ($valueProp -and $valueProp.Value) {
+            return [string]$valueProp.Value
+        }
+
+        return "Unknown"
+    }
+    catch {
+        Write-Log "Unable to read mailboxSettings/userPurpose for user id=$UserId :: $($_.Exception.Message)" "DEBUG"
+        return "Unknown"
+    }
+}
+
+function Get-DeltaRemovedReason {
+    param(
+        [Parameter(Mandatory)][object]$Object
+    )
+
+    $removedProp = $Object.PSObject.Properties['@removed']
+
+    if (-not $removedProp) {
+        return $null
+    }
+
+    if ($null -eq $removedProp.Value) {
+        return '<missing reason>'
+    }
+
+    $reasonProp = $removedProp.Value.PSObject.Properties['reason']
+
+    if ($reasonProp -and $reasonProp.Value) {
+        return [string]$reasonProp.Value
+    }
+
+    return '<missing reason>'
+}
+
+function Test-DeltaObjectRemoved {
+    param(
+        [Parameter(Mandatory)][object]$Object
+    )
+
+    return [bool]$Object.PSObject.Properties['@removed']
+}
+
+function Write-DeltaChangeDetails {
+    param(
+        [Parameter(Mandatory)][object]$Object,
+        [Parameter(Mandatory)][string]$ObjectType
+    )
+
+    $name = $null
+
+    if ($Object.PSObject.Properties['displayName'] -and $Object.displayName) {
+        $name = $Object.displayName
+    }
+    elseif ($Object.PSObject.Properties['userPrincipalName'] -and $Object.userPrincipalName) {
+        $name = $Object.userPrincipalName
+    }
+    elseif ($Object.PSObject.Properties['mail'] -and $Object.mail) {
+        $name = $Object.mail
+    }
+    elseif ($Object.PSObject.Properties['id'] -and $Object.id) {
+        $name = $Object.id
+    }
+    else {
+        $name = '<unknown>'
+    }
+
+    if (Test-DeltaObjectRemoved -Object $Object) {
+        $reason = Get-DeltaRemovedReason -Object $Object
+        $props = @($Object.PSObject.Properties.Name) -join ', '
+
+        Write-Log "DELTA REMOVED MARKER: Type=$ObjectType Name='$name' Id=$($Object.id) Reason=$reason Properties=[$props]" "WARN"
+        return
+    }
+
+    $changedProperties = @(
+        $Object.PSObject.Properties |
+        Where-Object {
+            $_.Name -notin @(
+                '@odata.type',
+                '@odata.context',
+                '@removed',
+                'id'
+            )
+        } |
+        Select-Object -ExpandProperty Name
+    )
+
+    Write-Log (
+        "DELTA UPDATE: Type={0} Name='{1}' Id={2} ChangedProperties={3}" -f
+        $ObjectType,
+        $name,
+        $Object.id,
+        ($changedProperties -join ', ')
+    ) "INFO"
+}
+
+function Assert-DeltaDeleteSafety {
+    param(
+        [Parameter()][object[]]$UserChanges,
+        [Parameter()][object[]]$GroupChanges,
+        [int]$DeleteSafetyThreshold = 25
+    )
+
+    $userRemovedCount = 0
+    $groupRemovedCount = 0
+
+    if ($UserChanges) {
+        $userRemovedCount = @(
+            $UserChanges | Where-Object {
+                Test-DeltaObjectRemoved -Object $_
+            }
+        ).Count
+    }
+
+    if ($GroupChanges) {
+        $groupRemovedCount = @(
+            $GroupChanges | Where-Object {
+                Test-DeltaObjectRemoved -Object $_
+            }
+        ).Count
+    }
+
+    $totalRemovedCount = $userRemovedCount + $groupRemovedCount
+
+    Write-Log "DELTA DELETE SAFETY CHECK: UserRemovedMarkers=$userRemovedCount GroupRemovedMarkers=$groupRemovedCount TotalRemovedMarkers=$totalRemovedCount Threshold=$DeleteSafetyThreshold" "WARN"
+
+    if ($totalRemovedCount -gt $DeleteSafetyThreshold) {
+        throw "Unsafe delta delete volume detected. RemovedMarkers=$totalRemovedCount exceeds DeleteSafetyThreshold=$DeleteSafetyThreshold. No target deletes were performed."
+    }
+}
+
 function Get-UserDeltaChanges {
     param(
         [Parameter(Mandatory)][string]$AccessToken,
@@ -663,9 +859,19 @@ function Get-UserDeltaChanges {
     )
 
     $baseProps = @(
-        'id','displayName','givenName','surname','mail','userPrincipalName',
-        'companyName','department','jobTitle','businessPhones','mobilePhone',
-        'officeLocation','onPremisesExtensionAttributes','mailboxsettings'
+    'id',
+    'displayName',
+    'givenName',
+    'surname',
+    'mail',
+    'userPrincipalName',
+    'companyName',
+    'department',
+    'jobTitle',
+    'businessPhones',
+    'mobilePhone',
+    'officeLocation',
+    'onPremisesExtensionAttributes'
     )
 
     $extraProps = Get-TopLevelSelectPropertiesFromAttributeFilters -AttributeFilters $AttributeFilters -ObjectType 'User'
@@ -745,8 +951,15 @@ function Get-UserDeltaChanges {
 
 } while ($uri)
 
+    $changesArray = if ($allChanges.Count -gt 0) {
+        [object[]]$allChanges.ToArray()
+    }
+    else {
+        [object[]]@()
+    }
+
     return [pscustomobject]@{
-        Changes   = $allChanges
+        Changes   = $changesArray
         DeltaLink = $finalDeltaLink
     }
 }
@@ -847,10 +1060,18 @@ function Get-GroupDeltaChanges {
     } while ($uri)
 
 
+    $changesArray = if ($allChanges.Count -gt 0) {
+        [object[]]$allChanges.ToArray()
+    }
+    else {
+        [object[]]@()
+    }
+
     return [pscustomobject]@{
-        Changes   = $allChanges
+        Changes   = $changesArray
         DeltaLink = $finalDeltaLink
     }
+
 }
 
 function Test-GroupInScope {
@@ -1160,20 +1381,8 @@ function Get-MailboxTypeFromGraphUser {
     param( 
         [Parameter(Mandatory)][object]$User 
     ) 
-    
-    $prop = $User.PSObject.Properties['mailboxSettings'] 
-    
-    if (-not $prop -or -not $prop.Value) { return "Unknown" } 
-    
-    $purpose = $prop.Value.userPurpose 
-    
-    switch ($purpose) { 
-        'user' { return 'UserMailbox' } 
-        'shared' { return 'SharedMailbox' } 
-        'room' { return 'RoomMailbox' } 
-        'equipment' { return 'EquipmentMailbox' } 
-        default { return "Unknown ($purpose)" } 
-    } 
+
+    return "Unknown"
 }
 
 function Test-UserInScope {
@@ -1243,7 +1452,7 @@ function New-SafeAlias {
     return $alias
 }
 
-function Get-DisplayNameForTarget {
+<#function Get-DisplayNameForTarget {
     param(
         [Parameter(Mandatory)][object]$User,
         [Parameter(Mandatory)][bool]$AppendSourceTenantToDisplayName,
@@ -1254,6 +1463,41 @@ function Get-DisplayNameForTarget {
     if ($AppendSourceTenantToDisplayName) {
         return "$name ($SourceTenantName)"
     }
+    return $name
+} #>
+
+function Get-DisplayNameForTarget {
+    param(
+        [Parameter(Mandatory)][object]$User,
+        [Parameter(Mandatory)][bool]$AppendSourceTenantToDisplayName,
+        [Parameter(Mandatory)][string]$SourceTenantName
+    )
+
+    $displayNameProp = $User.PSObject.Properties['displayName']
+    $upnProp = $User.PSObject.Properties['userPrincipalName']
+    $mailProp = $User.PSObject.Properties['mail']
+    $idProp = $User.PSObject.Properties['id']
+
+    if ($displayNameProp -and $displayNameProp.Value -and $displayNameProp.Value.ToString().Trim()) {
+        $name = $displayNameProp.Value.ToString().Trim()
+    }
+    elseif ($upnProp -and $upnProp.Value -and $upnProp.Value.ToString().Trim()) {
+        $name = $upnProp.Value.ToString().Trim()
+    }
+    elseif ($mailProp -and $mailProp.Value -and $mailProp.Value.ToString().Trim()) {
+        $name = $mailProp.Value.ToString().Trim()
+    }
+    elseif ($idProp -and $idProp.Value) {
+        $name = $idProp.Value.ToString()
+    }
+    else {
+        $name = "Unknown"
+    }
+
+    if ($AppendSourceTenantToDisplayName) {
+        return "$name ($SourceTenantName)"
+    }
+
     return $name
 }
 
@@ -2244,7 +2488,7 @@ if ($ConfigXmlPath) {
     $xmlConfig = Get-ConfigFromXml -Path $ConfigXmlPath
 }
 
-$config = Merge-Config -ParamConfig $paramConfig -XmlConfig $xmlConfig
+$config = Merge-Config -ParamConfig $paramConfig -XmlConfig $xmlConfig -BoundParameterNames $PSBoundParameters
 
 $config.AppendSourceTenantToDisplayName = [bool]$config.AppendSourceTenantToDisplayName
 $config.AllowUpnFallback = [bool]$config.AllowUpnFallback
@@ -2265,6 +2509,8 @@ $stateFile = Get-StateFilePath -Config $config
 $state = Load-State -Path $stateFile
 
 $IsFirstRun = -not $state.UserDeltaLink -and -not $state.GroupDeltaLink
+
+Write-Log "FirstRun=$IsFirstRun UserDeltaLinkPresent=$([bool]$state.UserDeltaLink) GroupDeltaLinkPresent=$([bool]$state.GroupDeltaLink)" "WARN"
 
 if ($IsFirstRun) {
     Write-Log "First run detected" "WARN"
@@ -2396,6 +2642,30 @@ try {
         }
     }
 
+    $IsUserInitialDeltaRun = $false
+    $IsGroupInitialDeltaRun = $false
+
+    if ($config.SourceObjectType -in @('User','Both')) {
+        $IsUserInitialDeltaRun = -not $state.UserDeltaLink
+    }
+
+    if ($config.SourceObjectType -in @('Group','Both')) {
+        $IsGroupInitialDeltaRun = -not $state.GroupDeltaLink
+    }
+
+    $IsInitialDeltaRun = $IsUserInitialDeltaRun -or $IsGroupInitialDeltaRun
+
+    Write-Log "InitialDeltaRun=$IsInitialDeltaRun UserInitialDeltaRun=$IsUserInitialDeltaRun GroupInitialDeltaRun=$IsGroupInitialDeltaRun" "WARN"
+
+    if ($IsInitialDeltaRun) {
+        Write-Log "Initial delta run detected - suppressing reconciliation for this run." "WARN"
+        $RunReconciliation = $false
+    }
+
+    if ($IsInitialDeltaRun -and -not $IsFirstRun) {
+        Write-Log "Initial delta run detected after ForceFullSync/delta reset." "WARN"
+    }
+
     # ---------------- DELTA PRE-CHECK (EARLY EXIT OPTIMIZATION) ----------------
 
     $userDeltaResult  = $null
@@ -2404,6 +2674,8 @@ try {
     $userChangeCount  = 0
     $groupChangeCount = 0
 
+    $IsPartialDeltaTestMode = ($MaxUserResults -gt 0 -or $MaxGroupResults -gt 0)
+
     # -------- USER DELTA --------
     if ($config.SourceObjectType -in @('User','Both')) {
 
@@ -2411,11 +2683,15 @@ try {
         # $userDeltaResult = Get-UserDeltaChanges -AccessToken $graphToken -DeltaLink $state.UserDeltaLink -AttributeFilters $config.AttributeFilters
         $userDeltaResult = Get-UserDeltaChanges -AccessToken $graphToken -DeltaLink $state.UserDeltaLink -AttributeFilters $config.AttributeFilters -maxresults $MaxUserResults
 
-        if ($userDeltaResult -and $userDeltaResult.Changes) {
-            $userChangeCount = $userDeltaResult.Changes.Count
+        if ($userDeltaResult -and $userDeltaResult.PSObject.Properties['Changes'] -and $null -ne $userDeltaResult.Changes) {
+            $userChangeCount = @($userDeltaResult.Changes).Count
         }
 
         Write-Log "User delta changes returned: $userChangeCount"
+
+        foreach ($user in $userDeltaResult.Changes) {
+            Write-DeltaChangeDetails -Object $user -ObjectType "User"
+        }
     }
 
     # -------- GROUP DELTA --------
@@ -2425,12 +2701,77 @@ try {
         #$groupDeltaResult = Get-GroupDeltaChanges -AccessToken $graphToken -DeltaLink $state.GroupDeltaLink -AttributeFilters $config.AttributeFilters
         $groupDeltaResult = Get-GroupDeltaChanges -AccessToken $graphToken -DeltaLink $state.GroupDeltaLink -AttributeFilters $config.AttributeFilters -MaxResults $MaxGroupResults
 
-        if ($groupDeltaResult -and $groupDeltaResult.Changes) {
-            $groupChangeCount = $groupDeltaResult.Changes.Count
+        if ($groupDeltaResult -and $groupDeltaResult.PSObject.Properties['Changes'] -and $null -ne $groupDeltaResult.Changes) {
+            $groupChangeCount = @($groupDeltaResult.Changes).Count
         }
 
         Write-Log "Group delta changes returned: $groupChangeCount"
+
+        <#foreach ($group in $groupDeltaResult.Changes) {
+            Write-DeltaChangeDetails -Object $group -ObjectType "Group"
+        }#>
     }
+
+        $userChangesForSafety = [object[]]@()
+        $groupChangesForSafety = [object[]]@()
+
+        if ($userDeltaResult -and $userDeltaResult.PSObject.Properties['Changes'] -and $null -ne $userDeltaResult.Changes) {
+            $userChangesForSafety = [object[]]$userDeltaResult.Changes
+        }
+
+        if ($groupDeltaResult -and $groupDeltaResult.PSObject.Properties['Changes'] -and $null -ne $groupDeltaResult.Changes) {
+            $groupChangesForSafety = [object[]]$groupDeltaResult.Changes
+        }
+
+    if ($userDeltaResult -and $userDeltaResult.PSObject.Properties['Changes'] -and $null -ne $userDeltaResult.Changes) {
+
+    $removedUsers = @(
+        $userDeltaResult.Changes |
+        Where-Object {
+            Test-DeltaObjectRemoved -Object $_
+        }
+    )
+
+    Write-Log "Removed user sample count: $($removedUsers.Count)" "WARN"
+
+    if ($LogLevel -ge 3 -and $userDeltaResult -and $userDeltaResult.PSObject.Properties['Changes'] -and $null -ne $userDeltaResult.Changes) {
+        $removedUsers = @(
+            $userDeltaResult.Changes |
+            Where-Object { Test-DeltaObjectRemoved -Object $_ }
+        )
+
+        Write-Log "Removed user sample count: $($removedUsers.Count)" "DEBUG"
+
+        $removedUsers |
+            Select-Object -First 20 |
+            ForEach-Object {
+                $reason = Get-DeltaRemovedReason -Object $_
+                Write-Log (
+                    "REMOVED SAMPLE: Id={0} Reason={1} Properties=[{2}]" -f
+                    $_.id,
+                    $reason,
+                    ($_.PSObject.Properties.Name -join ', ')
+                ) "DEBUG"
+            }
+    }
+}
+
+        if ($IsUserInitialDeltaRun) {
+            Write-Log "User initial delta run detected - excluding user tombstones from delete safety check." "WARN"
+            $userChangesForSafety = [object[]]@()
+        }
+
+        if ($IsGroupInitialDeltaRun) {
+            Write-Log "Group initial delta run detected - excluding group tombstones from delete safety check." "WARN"
+            $groupChangesForSafety = [object[]]@()
+        }
+
+        Assert-DeltaDeleteSafety `
+            -UserChanges $userChangesForSafety `
+            -GroupChanges $groupChangesForSafety `
+            -DeleteSafetyThreshold $DeleteSafetyThreshold
+
+        Write-Log "Delta delete safety check completed before Exchange connection." "DEBUG"
 
     # -------- EARLY EXIT --------
     if ($userChangeCount -eq 0 -and $groupChangeCount -eq 0) {
@@ -2448,8 +2789,13 @@ try {
                 $state.GroupDeltaLink = $groupDeltaResult.DeltaLink
             }
 
-            Save-State -Path $stateFile -State $state
-            Write-Log "State file updated. No processing required."
+            if ($IsPartialDeltaTestMode) {
+                Write-Log "Partial delta test mode active; state file not updated." "WARN"
+            }
+            else {
+                Save-State -Path $stateFile -State $state
+                Write-Log "State file updated. No processing required."
+            }
 
             return
         }
@@ -2460,7 +2806,28 @@ try {
 
     # ---------------- HYBRID LOOKUP MODE ----------------
 
-    $TotalChangeCount = $userChangeCount + $groupChangeCount
+    $activeUserChangeCount = 0
+    $activeGroupChangeCount = 0
+
+    if ($userDeltaResult -and $userDeltaResult.PSObject.Properties['Changes'] -and $null -ne $userDeltaResult.Changes) {
+        $activeUserChangeCount = @(
+            $userDeltaResult.Changes |
+            Where-Object { -not (Test-DeltaObjectRemoved -Object $_) }
+        ).Count
+    }
+
+    if ($groupDeltaResult -and $groupDeltaResult.PSObject.Properties['Changes'] -and $null -ne $groupDeltaResult.Changes) {
+        $activeGroupChangeCount = @(
+            $groupDeltaResult.Changes |
+            Where-Object { -not (Test-DeltaObjectRemoved -Object $_) }
+        ).Count
+    }
+
+    Write-Log "Active delta changes: Users=$activeUserChangeCount Groups=$activeGroupChangeCount" "INFO"
+
+    $TotalChangeCount = $activeUserChangeCount + $activeGroupChangeCount
+
+
     $UseBulkLookup = $false
 
     # Threshold — tune this (10–50 recommended)
@@ -2534,7 +2901,7 @@ try {
     # USER MAIN PROCESSING LOOP
     if ($config.SourceObjectType -in @('User','Both')) {
 
-    foreach ($item in $userDeltaResult.Changes) {
+    foreach ($item in @($userDeltaResult.Changes)) {
 
         if ($TopUsers -gt 0 -and $ProcessedCount -ge $TopUsers) {
             Write-Log "TopUsers limit reached ($TopUsers). Stopping processing." "WARN"
@@ -2558,12 +2925,38 @@ try {
             $existing = Get-TargetContactBySyncKey -SyncKey $syncKey
         }
 
-        # -------------------- DELTA DELETE --------------------
-        if ($item.PSObject.Properties.Name -contains '@removed') {
+        # -------------------- DELTA REMOVED MARKER --------------------
+        if (Test-DeltaObjectRemoved -Object $item) {
+
+            $removedReason = Get-DeltaRemovedReason -Object $item
+
+            if ($IsUserInitialDeltaRun) {
+                Write-Log "Ignoring USER deleted tombstone during initial user delta initialization: id=$($item.id) reason=$removedReason" "WARN"
+                $skipped++
+                continue
+            }
+
+            Write-Log "USER DELTA REMOVED MARKER: id=$($item.id) syncKey=$syncKey reason=$removedReason" "WARN"
 
             if ($SeedTargetFromSource -ne 'None') {
-                Write-Log "Skipping delete (seed mode): $syncKey" "WARN"
+                Write-Log "Skipping user removed marker because seed mode is active: $syncKey" "WARN"
+                $skipped++
                 continue
+            }
+
+            if ($RequireDeleteConfirmation) {
+                $sourceStillExists = Test-SourceGraphObjectExists `
+                    -AccessToken $graphToken `
+                    -ObjectId $item.id `
+                    -ObjectType 'User'
+
+                if ($sourceStillExists) {
+                    Write-Log "SUPPRESSED USER DELETE: delta returned @removed but source user still exists. id=$($item.id) syncKey=$syncKey reason=$removedReason" "WARN"
+                    $skipped++
+                    continue
+                }
+
+                Write-Log "CONFIRMED USER DELETE: source user no longer exists. Removing target contact. id=$($item.id) syncKey=$syncKey reason=$removedReason" "WARN"
             }
 
             $deleteResult = Remove-TargetMailContactBySyncKey `
@@ -2571,21 +2964,30 @@ try {
                 -ExistingContacts $existingContacts `
                 -DisableDeletes:$config.DisableDeletes
 
-            if ($deleteResult -eq "Deleted") { $deleted++ }
+            if ($deleteResult -eq "Deleted") {
+                $deleted++
+            }
+            else {
+                $skipped++
+            }
+
             continue
         }
 
         # -------------------- BASIC OBJECT INFO --------------------
         $displayName = '<no displayName>'
-        if ($item.displayName) { $displayName = $item.displayName }
+        $displayNameProp = $item.PSObject.Properties['displayName']
+
+        if ($displayNameProp -and $displayNameProp.Value) {
+            $displayName = $displayNameProp.Value
+        }
 
         $upn = Get-SafeUpn -User $item
 
-        $mailboxType = Get-MailboxTypeFromGraphUser -User $item 
-        Write-Log "MailboxType detected: $upn => $mailboxType" "DEBUG"
+        # mailboxSettings is not available from /users/delta $select.
+        
+        # Do not evaluate mailbox type in the delta loop unless you intentionally add a separate mailboxSettings lookup.
 
-        # not sure if i want this
-        #if ($mailboxType -ne 'UserMailbox') { Write-Log "Skipping non-user mailbox: $upn ($mailboxType)" "INFO" ; $skipped++ ; continue }
 
         if (-not $upn) {
             Write-Log "Skipping object with missing UPN: [$($item.id)] displayName='$displayName'" 'WARN'
@@ -2709,7 +3111,7 @@ try {
     # GROUP MAIN PROCESSING LOOP
     if ($config.SourceObjectType -in @('Group','Both')) {
 
-    foreach ($group in $groupDeltaResult.Changes) {
+    foreach ($group in @($groupDeltaResult.Changes)) {
 
         if ($TopUsers -gt 0 -and $ProcessedCount -ge $TopUsers) {
             Write-Log "TopUsers limit reached ($TopUsers). Stopping processing." "WARN"
@@ -2753,28 +3155,53 @@ try {
             $existing = Get-TargetContactBySyncKey -SyncKey $syncKey
         }
 
-        # -------------------- DELTA DELETE --------------------
-        if ($group.PSObject.Properties.Name -contains '@removed') {
+        # -------------------- DELTA REMOVED MARKER --------------------
+        if (Test-DeltaObjectRemoved -Object $group) {
 
-            Write-Log "DELTA DELETE DETECTED: id=$($group.id) syncKey=$syncKey" "DEBUG"
+            $removedReason = Get-DeltaRemovedReason -Object $group
 
-            if ($SeedTargetFromSource -ne 'None') {
-                Write-Log "Skipping delete (seed mode): $syncKey" "WARN"
+            if ($IsGroupInitialDeltaRun) {
+                Write-Log "Ignoring GROUP deleted tombstone during initial group delta initialization: id=$($group.id) reason=$removedReason" "WARN"
                 $skipped++
                 continue
             }
 
-            Write-Log "DELETE REQUEST: type=Group syncKey=$syncKey usingOnDemand=$(-not $existingContacts)" "DEBUG"
+            Write-Log "GROUP DELTA REMOVED MARKER: id=$($group.id) syncKey=$syncKey reason=$removedReason" "WARN"
+
+            if ($SeedTargetFromSource -ne 'None') {
+                Write-Log "Skipping group removed marker because seed mode is active: $syncKey" "WARN"
+                $skipped++
+                continue
+            }
+
+            if ($RequireDeleteConfirmation) {
+                $sourceStillExists = Test-SourceGraphObjectExists `
+                    -AccessToken $graphToken `
+                    -ObjectId $group.id `
+                    -ObjectType 'Group'
+
+                if ($sourceStillExists) {
+                    Write-Log "SUPPRESSED GROUP DELETE: delta returned @removed but source group still exists. id=$($group.id) syncKey=$syncKey reason=$removedReason" "WARN"
+                    $skipped++
+                    continue
+                }
+
+                Write-Log "CONFIRMED GROUP DELETE: source group no longer exists. Removing target contact. id=$($group.id) syncKey=$syncKey reason=$removedReason" "WARN"
+            }
 
             $deleteResult = Remove-TargetMailContactBySyncKey `
                 -SyncKey $syncKey `
                 -ExistingContacts $existingContacts `
                 -DisableDeletes:$config.DisableDeletes
 
-            if ($deleteResult -eq "Deleted") { 
+            if ($deleteResult -eq "Deleted") {
                 $deleted++
-                Write-Log "DELETE RESULT: syncKey=$syncKey result=$deleteResult" "DEBUG"    
+                Write-Log "GROUP DELETE RESULT: syncKey=$syncKey result=$deleteResult" "DEBUG"
             }
+            else {
+                $skipped++
+            }
+
             continue
         }
 
@@ -2787,7 +3214,14 @@ try {
             continue
         }
 
-        Write-Log "DEBUG PROXY: $($group.proxyAddresses)" "WARN"
+        $proxyAddressesText = '<not present>'
+        $proxyProp = $group.PSObject.Properties['proxyAddresses']
+
+        if ($proxyProp -and $proxyProp.Value) {
+            $proxyAddressesText = ($proxyProp.Value -join ', ')
+        }
+
+        Write-Log "DEBUG PROXY: $proxyAddressesText" "DEBUG"
 
         # Generic GROUP-ONLY filter debug driven by XML
         foreach ($filter in @($config.AttributeFilters)) {
@@ -2858,7 +3292,12 @@ try {
 
         if ($matchedGroupAttributeFilter) {
 
-            Write-Log "FILTER MATCHED (GROUP): $($group.displayName) [$syncKey]" "WARN"
+            $groupDisplayName = Get-DisplayNameForTarget `
+                -User $group `
+                -AppendSourceTenantToDisplayName:$false `
+                -SourceTenantName $config.SourceTenantName
+
+            Write-Log "FILTER MATCHED (GROUP): $groupDisplayName [$syncKey]" "WARN"
 
             if ($existing -and $SeedTargetFromSource -eq 'None') {
 
@@ -2936,14 +3375,19 @@ try {
         $state.LastReconciliationUtc = [DateTime]::UtcNow.ToString("o")
         Write-Log "Reconciliation timestamp updated: $($state.LastReconciliationUtc)" "DEBUG"
 
-        Save-State -Path $stateFile -State $state
-        Write-Log "State persisted after reconciliation update" "DEBUG"
+        if ($IsPartialDeltaTestMode) {
+            Write-Log "Partial delta test mode active; reconciliation timestamp/state not persisted." "WARN"
+        }
+        else {
+            Save-State -Path $stateFile -State $state
+            Write-Log "State persisted after reconciliation update" "DEBUG"
+        }
 
     }
 
     # =========================================================
 
-    if ($TopUsers -eq 0) {
+    if ($TopUsers -eq 0 -and -not $IsPartialDeltaTestMode) {
 
         # ---------------- USER DELTA ----------------
         if ($userDeltaResult -and $userDeltaResult.PSObject.Properties['DeltaLink'] -and $userDeltaResult.DeltaLink) {
@@ -2973,17 +3417,12 @@ try {
             Write-Log "Initialized reconciliation timestamp on first run" "DEBUG"
         }
 
-        # ALWAYS persist state unless in test mode
-        if ($TopUsers -eq 0) { 
-            Save-State -Path $stateFile -State $state 
-            Write-Log "Final state persisted" "DEBUG" 
-        } else { 
-            Write-Log "TopUsers test mode active — skipping state save" "WARN" 
-        }
+        Save-State -Path $stateFile -State $state
+        Write-Log "Final state persisted" "DEBUG"
 
     }
     else {
-        Write-Log "TopUsers test mode active OR no deltaLink returned; state not updated." "WARN"
+        Write-Log "Test mode active or incomplete delta run; state not updated." "WARN"
     }
 
 

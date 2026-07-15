@@ -7,7 +7,7 @@
     [string]$SourceFolder = "C:\temp\TenantContactSync\Logs",
     [string]$TargetFolder = "C:\temp\TenantContactSync\Logs\Zips",
     [string]$Extension = "*.log",
-    [int]$RetentionDays = 14,
+    [int]$RetentionDays = 7,
     [string]$LogPath = "C:\temp\TenantContactSync\Logs\Zips\ArchiveJob.log"
 )
 
