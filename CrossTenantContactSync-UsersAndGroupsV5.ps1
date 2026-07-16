@@ -2656,9 +2656,6 @@ $config.SourceUserScopeMode = [string]$config.SourceUserScopeMode
 $config.SourceUserScopeGroupId = [string]$config.SourceUserScopeGroupId
 $config.SourceUserScopeGroupTransitive = [bool]$config.SourceUserScopeGroupTransitive
 
-Write-Log "SourceUserScopeMode: '$($config.SourceUserScopeMode)'" "DEBUG" 
-Write-Log "SourceUserGroupId  : '$($config.SourceUserScopeGroupId)'" "DEBUG" 
-
 if (-not (Assert-Config -Config $config)) {
 
     Write-Log "Configuration validation failed. Sync will not run." "ERROR"
@@ -2677,6 +2674,9 @@ Ensure-Folder -Path $config.LogRoot
 
 $script:LogFile = Join-Path $config.LogRoot ("{0:yyyyMMdd_HHmmss}_{1}_TO_{2}.log" -f (Get-Date), $config.SourceTenantName, $config.TargetTenantName)
 New-Item -ItemType File -Path $script:LogFile -Force | Out-Null
+
+Write-Log "SourceUserScopeMode: '$($config.SourceUserScopeMode)'" "DEBUG" 
+Write-Log "SourceUserGroupId  : '$($config.SourceUserScopeGroupId)'" "DEBUG" 
 
 $stateFile = Get-StateFilePath -Config $config
 $state = Load-State -Path $stateFile
