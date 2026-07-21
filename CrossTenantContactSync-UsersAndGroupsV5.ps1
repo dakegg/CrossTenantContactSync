@@ -312,7 +312,7 @@ param(
     [switch]$ForceReconciliation,
     [int]$MaxUserResults  = 0,
     [int]$MaxGroupResults = 0,
-    [int]$DeleteSafetyThreshold = 500,
+    [int]$DeleteSafetyThreshold = 750,
     [int]$MaxDeltaDetailLogItems = 50,
     [bool]$RequireDeleteConfirmation = $true,
 
@@ -1263,7 +1263,7 @@ function Test-GroupInScope {
     return $false
 }
 
-function Resolve-RecipientConflictByEmail {
+<#function Resolve-RecipientConflictByEmail {
     param(
         [Parameter(Mandatory)][string]$Email
     )
@@ -1295,6 +1295,77 @@ function Resolve-RecipientConflictByEmail {
     return [pscustomobject]@{
         ConflictFound = $true
         RecipientType = $recipient.RecipientType
+        Recipient     = $recipient
+    }
+} #>
+
+function Resolve-RecipientConflictByEmail {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Email
+    )
+
+    $allRecipients = @(Find-ExistingRecipientByEmail -Email $Email)
+
+    if ($allRecipients.Count -eq 0) {
+        return [pscustomobject]@{
+            ConflictFound = $false
+            RecipientType = $null
+            Recipient     = $null
+        }
+    }
+
+    if ($allRecipients.Count -gt 1) {
+        Write-Log "Multiple recipient conflicts for $Email. Count = $($allRecipients.Count)" "WARN"
+
+        return [pscustomobject]@{
+            ConflictFound = $true
+            RecipientType = "Multiple"
+            Recipient     = $allRecipients
+        }
+    }
+
+    $recipient = $allRecipients | Where-Object { $_ -ne $null } | Select-Object -First 1
+
+    if ($null -eq $recipient)
+    {
+        Write-Log "Recipient lookup returned only null objects for $Email" "WARN"
+
+        return [pscustomobject]@{
+            ConflictFound = $false
+            RecipientType = $null
+            Recipient     = $null
+        }
+    }
+
+    $recipient = $allRecipients[0]
+
+    $propertyNames = @(
+        $recipient |
+            Get-Member -MemberType Property |
+            Select-Object -ExpandProperty Name
+    )
+
+    Write-Log "Recipient class: $($recipient.GetType().FullName)" "DEBUG"
+    Write-Log "Recipient properties: $($propertyNames -join ', ')" "DEBUG"
+
+    $recipientType = $null
+
+    if ($propertyNames -contains "RecipientType") {
+        $recipientType = $recipient.RecipientType
+    }
+    elseif ($propertyNames -contains "RecipientTypeDetails") {
+        $recipientType = $recipient.RecipientTypeDetails
+    }
+    else {
+        $recipientType = "Unknown"
+    }
+
+    Write-Log "Recipient conflict for $Email : Type = $recipientType Identity = $($recipient.Identity) PrimarySmtp = $($recipient.PrimarySmtpAddress)" "WARN"
+
+    return [pscustomobject]@{
+        ConflictFound = $true
+        RecipientType = $recipientType
         Recipient     = $recipient
     }
 }
@@ -1633,7 +1704,7 @@ function Get-DisplayNameForTarget {
 
 # -------------------- Exchange target side --------------------
 
-function Find-ExistingRecipientByEmail {
+<# function Find-ExistingRecipientByEmail {
     param(
         [Parameter(Mandatory)][string]$Email
     )
@@ -1653,6 +1724,28 @@ function Find-ExistingRecipientByEmail {
         }
     catch {
         Write-Log "Recipient lookup failed for $Email :: $($_.Exception.Message)" "WARN"
+        return @()
+    }
+} #>
+
+function Find-ExistingRecipientByEmail {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Email
+    )
+
+    $normalized = $Email.Trim().ToLowerInvariant()
+
+    try {
+        $matches = Get-Recipient `
+            -ResultSize Unlimited `
+            -Filter "EmailAddresses -eq 'smtp:$normalized'" `
+            -ErrorAction Stop
+
+        return @($matches)
+    }
+    catch {
+        Write-Log "Recipient lookup failed for $Email : $($_.Exception.Message)" "WARN"
         return @()
     }
 }
