@@ -312,7 +312,7 @@ param(
     [switch]$ForceReconciliation,
     [int]$MaxUserResults  = 0,
     [int]$MaxGroupResults = 0,
-    [int]$DeleteSafetyThreshold = 750,
+    [int]$DeleteSafetyThreshold = 3000,
     [int]$MaxDeltaDetailLogItems = 50,
     [bool]$RequireDeleteConfirmation = $true,
 
@@ -403,8 +403,31 @@ function Write-Log {
     $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     $line = "[{0}] [{1}] {2}" -f $ts, $Level, $Message
 
-    Write-Host $line
-    Add-Content -LiteralPath $script:LogFile -Value $line
+    $attempt = 0
+
+    while ($attempt -lt 5)
+    {
+        try
+        {
+            Write-Host $line
+            Add-Content -LiteralPath $script:LogFile -Value $line -ErrorAction Stop
+            break
+        }
+        catch
+        {
+            $attempt++
+
+            if ($attempt -eq 5)
+            {
+                throw
+            }
+
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
+    #Write-Host $line
+    #Add-Content -LiteralPath $script:LogFile -Value $line
 }
 
 function Import-RequiredModule {
